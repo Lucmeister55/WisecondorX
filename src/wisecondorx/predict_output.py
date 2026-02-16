@@ -2,6 +2,7 @@
 
 import os
 import re
+import math
 import numpy as np
 
 from wisecondorx.overall_tools import (
@@ -16,10 +17,14 @@ Writes plots.
 """
 
 
-def exec_write_plots(rem_input, results):
+def exec_write_plots(rem_input, results, conumee=False):
     json_plot_dir = os.path.abspath(rem_input["args"].outid + "_plot_tmp")
+
+    # Choose R script depending on conumee flag
+    r_script_file = "plotter_conumee.R" if conumee else "plotter.R"
+
     json_dict = {
-        "R_script": str("{}/include/plotter.R".format(rem_input["wd"])),
+        "R_script": str("{}/include/{}".format(rem_input["wd"], r_script_file)),
         "ref_gender": str(rem_input["ref_gender"]),
         "beta": str(rem_input["args"].beta),
         "zscore": str(rem_input["args"].zscore),
@@ -29,6 +34,11 @@ def exec_write_plots(rem_input, results):
         "results_r": results["results_r"],
         "results_w": results["results_w"],
         "results_c": results["results_c"],
+        "results_variance": results["results_variance"],
+        "ref_sizes": rem_input["ref_sizes"].tolist(),
+        "min_coverage_refsize": str(rem_input["args"].min_coverage_refsize if rem_input["args"].min_coverage_refsize else "NULL"),
+        "min_confidence_score": str(rem_input["args"].min_confidence_score if rem_input["args"].min_confidence_score else "NULL"),
+        "plot_loci_bed": str(rem_input["args"].plot_loci_bed if rem_input["args"].plot_loci_bed else "NULL"),
         "ylim": str(rem_input["args"].ylim),
         "regions": str(rem_input["args"].regions),
         "infile": str("{}.json".format(json_plot_dir)),
@@ -36,7 +46,6 @@ def exec_write_plots(rem_input, results):
     }
 
     if rem_input["args"].add_plot_title:
-        # Strip away paths from the outid if need be
         json_dict["plot_title"] = str(os.path.basename(rem_input["args"].outid))
 
     exec_R(json_dict)
@@ -54,6 +63,111 @@ def generate_output_tables(rem_input, results):
     _generate_chr_statistics_file(rem_input, results)
     if rem_input["args"].regions is not None:
         _generate_regions_bed(rem_input, results)
+
+
+def generate_plot_bins_stats(rem_input, results):
+    out_path = "{}_plot_bins_stats.tsv".format(rem_input["args"].outid)
+    binsize = rem_input["binsize"]
+    min_refsize = rem_input["args"].min_coverage_refsize
+    min_confidence = rem_input["args"].min_confidence_score
+    loci_bed = rem_input["args"].plot_loci_bed
+    sample_counts = rem_input.get("sample_counts", None)
+
+    results_r = results["results_r"]
+    results_z = results["results_z"]
+    results_w = results["results_w"]
+    results_v = results["results_variance"]
+    results_rs = results["results_refsizes"]
+
+    # Build loci mask if requested (autosomes only, like plotter)
+    loci_mask = None
+    if loci_bed is not None and os.path.exists(loci_bed):
+        loci_mask = []
+        for chr_idx in range(22):
+            loci_mask.append([False] * len(results_r[chr_idx]))
+        try:
+            with open(loci_bed, "r") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    parts = line.strip().split("\t")
+                    if len(parts) < 3:
+                        continue
+                    chr_name = parts[0].replace("chr", "")
+                    if chr_name in ["X", "Y"]:
+                        continue
+                    try:
+                        chr_idx = int(chr_name) - 1
+                        if chr_idx < 0 or chr_idx >= 22:
+                            continue
+                        start = int(parts[1])
+                        end = int(parts[2])
+                    except ValueError:
+                        continue
+                    bin_start = max(0, start // binsize)
+                    bin_end = max(0, (end - 1) // binsize)
+                    bin_end = min(bin_end, len(results_r[chr_idx]) - 1)
+                    if bin_start > bin_end:
+                        continue
+                    for b in range(bin_start, bin_end + 1):
+                        loci_mask[chr_idx][b] = True
+        except Exception:
+            loci_mask = None
+
+    with open(out_path, "w") as out:
+        out.write(
+            "chr\tstart\tend\treads\tratio\tzscore\tweight\tvariance\trefsize\tconfidence\tplotted\n"
+        )
+        for chr_idx in range(22):
+            chr_name = str(chr_idx + 1)
+            feat = 1
+            for i in range(len(results_r[chr_idx])):
+                r = results_r[chr_idx][i]
+                z = results_z[chr_idx][i]
+                w = results_w[chr_idx][i]
+                v = results_v[chr_idx][i]
+                rs = results_rs[chr_idx][i]
+
+                # Get original read count from sample
+                reads = 0
+                if sample_counts is not None and chr_name in sample_counts:
+                    if i < len(sample_counts[chr_name]):
+                        reads = int(sample_counts[chr_name][i])
+
+                ratio_val = float("nan") if r == 0 else r
+                plotted = True
+
+                if r == 0 or np.isnan(ratio_val):
+                    plotted = False
+
+                if min_refsize is not None and rs < min_refsize:
+                    plotted = False
+
+                confidence = 0
+                if v and v > 0:
+                    confidence = rs / v
+                if min_confidence is not None and confidence < min_confidence:
+                    plotted = False
+
+                if loci_mask is not None and not loci_mask[chr_idx][i]:
+                    plotted = False
+
+                out.write(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(
+                        chr_name,
+                        feat,
+                        feat + binsize - 1,
+                        reads,
+                        ratio_val,
+                        "nan" if z == 0 else z,
+                        "nan" if w == 0 else w,
+                        "nan" if v == 0 else v,
+                        "nan" if rs == 0 else rs,
+                        confidence,
+                        1 if plotted else 0,
+                    )
+                )
+                feat += binsize
 
 
 def _generate_bins_bed(rem_input, results):
@@ -137,7 +251,58 @@ def _generate_segments_and_aberrations_bed(rem_input, results):
     segments_file = open("{}_segments.bed".format(rem_input["args"].outid), "w")
     aberrations_file = open("{}_aberrations.bed".format(rem_input["args"].outid), "w")
     segments_file.write("chr\tstart\tend\tratio\tzscore\n")
-    aberrations_file.write("chr\tstart\tend\tratio\tzscore\ttype\n")
+    aberrations_file.write("chr\tstart\tend\tratio\tzscore\ttype\tgenes\tpval\n")
+
+    regions_by_chr = {}
+    regions_path = rem_input["args"].regions
+    if regions_path is not None and os.path.exists(regions_path):
+        try:
+            with open(regions_path, "r") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 4:
+                        continue
+                    chr_name = parts[0].replace("chr", "")
+                    try:
+                        start = int(parts[1])
+                        end = int(parts[2])
+                    except ValueError:
+                        continue
+                    gene = parts[3]
+                    if chr_name in ["X", "Y"]:
+                        chr_key = chr_name
+                    else:
+                        try:
+                            chr_key = str(int(chr_name))
+                        except ValueError:
+                            continue
+                    if chr_key not in regions_by_chr:
+                        regions_by_chr[chr_key] = []
+                    regions_by_chr[chr_key].append((start, end, gene))
+        except Exception:
+            regions_by_chr = {}
+
+    def get_overlapping_genes(chr_name, seg_start, seg_end):
+        if chr_name not in regions_by_chr:
+            return "."
+        genes = []
+        for start, end, gene in regions_by_chr[chr_name]:
+            if end >= seg_start and start <= seg_end:
+                genes.append(gene)
+        if not genes:
+            return "."
+        return ",".join(sorted(set(genes)))
+
+    def get_z_pval(zscore):
+        try:
+            z = float(zscore)
+        except (TypeError, ValueError):
+            return "."
+        if not math.isfinite(z):
+            return "."
+        return math.erfc(abs(z) / math.sqrt(2.0))
 
     for segment in results["results_c"]:
         chr_name = str(segment[0] + 1)
@@ -162,26 +327,34 @@ def _generate_segments_and_aberrations_bed(rem_input, results):
                 float(segment[4])
                 > __get_aberration_cutoff(rem_input["args"].beta, ploidy)[1]
             ):
+                genes = get_overlapping_genes(row[0], row[1], row[2])
+                pval = get_z_pval(row[4])
                 aberrations_file.write(
-                    "{}\tgain\n".format("\t".join([str(x) for x in row]))
+                    "{}\tgain\t{}\t{}\n".format("\t".join([str(x) for x in row]), genes, pval)
                 )
             elif (
                 float(segment[4])
                 < __get_aberration_cutoff(rem_input["args"].beta, ploidy)[0]
             ):
+                genes = get_overlapping_genes(row[0], row[1], row[2])
+                pval = get_z_pval(row[4])
                 aberrations_file.write(
-                    "{}\tloss\n".format("\t".join([str(x) for x in row]))
+                    "{}\tloss\t{}\t{}\n".format("\t".join([str(x) for x in row]), genes, pval)
                 )
         elif isinstance(segment[3], str):
             continue
         else:
             if float(segment[3]) > rem_input["args"].zscore:
+                genes = get_overlapping_genes(row[0], row[1], row[2])
+                pval = get_z_pval(row[4])
                 aberrations_file.write(
-                    "{}\tgain\n".format("\t".join([str(x) for x in row]))
+                    "{}\tgain\t{}\t{}\n".format("\t".join([str(x) for x in row]), genes, pval)
                 )
             elif float(segment[3]) < -rem_input["args"].zscore:
+                genes = get_overlapping_genes(row[0], row[1], row[2])
+                pval = get_z_pval(row[4])
                 aberrations_file.write(
-                    "{}\tloss\n".format("\t".join([str(x) for x in row]))
+                    "{}\tloss\t{}\t{}\n".format("\t".join([str(x) for x in row]), genes, pval)
                 )
 
     segments_file.close()

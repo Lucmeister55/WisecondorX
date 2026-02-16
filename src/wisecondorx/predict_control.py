@@ -32,11 +32,11 @@ def normalize(args, sample, ref_file, ref_gender):
     sample = project_pc(sample, ref_file, ap)
     results_w = get_weights(ref_file, ap)[ct:]
     optimal_cutoff = get_optimal_cutoff(ref_file, args.maskrepeats)
-    results_z, results_r, ref_sizes, m_lr, m_z = normalize_repeat(
+    results_z, results_r, ref_sizes, results_variance, m_lr, m_z = normalize_repeat(
         sample, ref_file, optimal_cutoff, ct, cp, ap
     )
 
-    return results_r, results_z, results_w, ref_sizes, m_lr, m_z
+    return results_r, results_z, results_w, ref_sizes, results_variance, m_lr, m_z
 
 
 """

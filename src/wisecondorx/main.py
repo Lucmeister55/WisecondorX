@@ -8,7 +8,7 @@ import warnings
 
 import numpy as np
 
-from wisecondorx.convert_tools import convert_reads
+from wisecondorx.convert_tools import convert_reads, convert_idat
 from wisecondorx.newref_control import (
     tool_newref_prep,
     tool_newref_main,
@@ -17,7 +17,12 @@ from wisecondorx.newref_control import (
 from wisecondorx.newref_tools import train_gender_model, get_mask
 from wisecondorx.overall_tools import gender_correct, scale_sample
 from wisecondorx.predict_control import normalize, get_post_processed_result
-from wisecondorx.predict_output import generate_output_tables, exec_write_plots
+from wisecondorx.predict_output import (
+    generate_output_tables,
+    exec_write_plots,
+    generate_plot_bins_stats,
+)
+from wisecondorx.epic_cfrrbs import tool_epic_cfrrbs
 from wisecondorx.predict_tools import (
     log_trans,
     exec_cbs,
@@ -28,11 +33,28 @@ from wisecondorx.predict_tools import (
 
 def tool_convert(args):
     logging.info("Starting conversion")
+    args.wd = str(os.path.dirname(os.path.realpath(__file__)))
 
-    sample, qual_info = convert_reads(args)
-    np.savez_compressed(
-        args.outfile, binsize=args.binsize, sample=sample, quality=qual_info
-    )
+    is_idat = False
+    if args.infile.endswith(".idat"):
+        is_idat = True
+    elif os.path.isdir(args.infile):
+        for root, _, files in os.walk(args.infile):
+            if any(name.endswith(".idat") for name in files):
+                is_idat = True
+                break
+
+    if is_idat:
+        if not args.conumee_anno or not args.conumee_ref_m or not args.conumee_ref_f:
+            logging.warning(
+                "Conumee annotation/reference not provided; attempting to use packaged conumeeData references."
+            )
+        convert_idat(args)
+    else:
+        sample, qual_info = convert_reads(args)
+        np.savez_compressed(
+            args.outfile, binsize=args.binsize, sample=sample, quality=qual_info
+        )
 
     logging.info("Finished conversion")
 
@@ -136,7 +158,7 @@ def tool_newref(args):
 def tool_test(args):
     logging.info("Starting CNA prediction")
 
-    if not args.bed and not args.plot:
+    if not args.bed and not args.plot and not args.conumee:
         logging.critical(
             "No output format selected. "
             "Select at least one of the supported output formats (--bed, --plot)"
@@ -184,7 +206,7 @@ def tool_test(args):
 
     logging.info("Normalizing autosomes ...")
 
-    results_r, results_z, results_w, ref_sizes, m_lr, m_z = normalize(
+    results_r, results_z, results_w, ref_sizes, results_variance, m_lr, m_z = normalize(
         args, sample, ref_file, "A"
     )
 
@@ -214,7 +236,7 @@ def tool_test(args):
         len(null_ratios_aut_per_bin) :
     ]
 
-    results_r_2, results_z_2, results_w_2, ref_sizes_2, _, _ = normalize(
+    results_r_2, results_z_2, results_w_2, ref_sizes_2, results_variance_2, _, _ = normalize(
         args, sample, ref_file, ref_gender
     )
 
@@ -231,6 +253,9 @@ def tool_test(args):
         "masked_bins_per_chr_cum": ref_file[
             "masked_bins_per_chr_cum.{}".format(ref_gender)
         ],
+        "conumee": args.conumee,
+        "ref_sizes": ref_sizes,
+        "sample_counts": sample,
     }
 
     del ref_file
@@ -241,6 +266,7 @@ def tool_test(args):
         results_w * np.nanmean(results_w_2), results_w_2 * np.nanmean(results_w)
     )
     results_w = results_w / np.nanmean(results_w)
+    results_variance = np.append(results_variance, results_variance_2)
 
     if np.isnan(results_w).any() or np.isinf(results_w).any():
         logging.warning(
@@ -257,6 +283,8 @@ def tool_test(args):
         "results_z": results_z,
         "results_w": results_w,
         "results_nr": null_ratios,
+        "results_variance": results_variance,
+        "results_refsizes": ref_sizes,
     }
 
     for result in results.keys():
@@ -280,7 +308,16 @@ def tool_test(args):
 
     if args.plot:
         logging.info("Writing plots ...")
-        exec_write_plots(rem_input, results)
+        exec_write_plots(rem_input, results, conumee=False)
+    
+    if args.conumee:
+        logging.info("Note: Conumee style plots were requested (--conumee). "
+                     "These are optimized for visualization in Conumee and might differ from standard WisecondorX plots.")
+        exec_write_plots(rem_input, results, conumee=True)
+
+    if args.plot or args.conumee:
+        logging.info("Writing plot bin statistics ...")
+        generate_plot_bins_stats(rem_input, results)
 
     logging.info("Finished prediction")
 
@@ -327,6 +364,37 @@ def main():
     )
     parser_convert.add_argument(
         "--normdup", action="store_true", help="Do not remove duplicates"
+    )
+    parser_convert.add_argument(
+        "--conumee-anno",
+        type=str,
+        default=None,
+        help="Conumee annotation RData for EPIC IDAT conversion",
+    )
+    parser_convert.add_argument(
+        "--conumee-ref-m",
+        type=str,
+        default=None,
+        help="Conumee male reference RData for EPIC IDAT conversion",
+    )
+    parser_convert.add_argument(
+        "--conumee-ref-f",
+        type=str,
+        default=None,
+        help="Conumee female reference RData for EPIC IDAT conversion",
+    )
+    parser_convert.add_argument(
+        "--epic-gender",
+        type=str,
+        choices=["F", "M"],
+        default=None,
+        help="Optional gender for EPIC IDAT conversion",
+    )
+    parser_convert.add_argument(
+        "--epic-segments-out",
+        type=str,
+        default=None,
+        help="Optional output path for EPIC segment bed",
     )
     parser_convert.set_defaults(func=tool_convert)
 
@@ -462,6 +530,11 @@ def main():
     )
     parser_test.add_argument("--plot", action="store_true", help="Outputs .png plots")
     parser_test.add_argument(
+        "--conumee",
+        action="store_true",
+        help="Use Conumee-specific styles for plotting.",
+    )
+    parser_test.add_argument(
         "--cairo",
         action="store_true",
         help="Uses cairo bitmap type for plotting. Might be necessary for certain setups.",
@@ -481,7 +554,85 @@ def main():
         help="List of regions to be marked on the output plot, structure of header-less "
         "file: chr...(/t)startpos(/t)endpos(/n)name. If not given, no regions will be marked.",
     )
+    parser_test.add_argument(
+        "--min-coverage-refsize",
+        type=int,
+        default=None,
+        help="Minimum number of reference samples per bin to be plotted. Bins below this threshold will be hidden. "
+        "Useful for filtering out sparse, low-confidence regions. Default: None (plot all bins).",
+    )
+    parser_test.add_argument(
+        "--min-confidence-score",
+        type=float,
+        default=None,
+        help="Minimum confidence score for plotting (ref_sizes / variance). Bins below this threshold are hidden. "
+        "Useful for EPIC-like stability filtering. Default: None (plot all bins).",
+    )
+    parser_test.add_argument(
+        "--plot-loci-bed",
+        type=str,
+        default=None,
+        help="Optional BED file of loci to keep for plotting. Only bins overlapping these loci are plotted. "
+        "Useful to restrict cfRRBS plots to EPIC probe loci for fair comparison.",
+    )
     parser_test.set_defaults(func=tool_test)
+
+    parser_epic = subparsers.add_parser(
+        "epic-cfrrbs",
+        description="Correlate EPIC array CNVs (IDAT) with cfRRBS (NPZ)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_epic.add_argument(
+        "sample_sheet",
+        type=str,
+        help="Sample sheet (CSV/TSV) containing EPIC and cfRRBS IDs and paths",
+    )
+    parser_epic.add_argument(
+        "reference",
+        type=str,
+        help="WisecondorX reference .npz for cfRRBS",
+    )
+    parser_epic.add_argument(
+        "outdir",
+        type=str,
+        help="Output directory for reports and intermediate files",
+    )
+    parser_epic.add_argument(
+        "--max-replicates",
+        type=int,
+        default=None,
+        help="Limit number of sample pairs to process",
+    )
+    parser_epic.add_argument(
+        "--skip-cfrrbs-predict",
+        action="store_true",
+        help="Skip WisecondorX predict if cfRRBS outputs already exist",
+    )
+    parser_epic.add_argument(
+        "--beta",
+        type=float,
+        default=None,
+        help="Optional beta for cfRRBS aberration calling",
+    )
+    parser_epic.add_argument(
+        "--zscore",
+        type=float,
+        default=None,
+        help="Optional z-score for cfRRBS aberration calling",
+    )
+    parser_epic.add_argument(
+        "--blacklist",
+        type=str,
+        default=None,
+        help="Optional blacklist for cfRRBS prediction",
+    )
+    parser_epic.add_argument(
+        "--gender",
+        type=str,
+        choices=["F", "M"],
+        help="Optional forced gender for cfRRBS prediction",
+    )
+    parser_epic.set_defaults(func=tool_epic_cfrrbs)
 
     args = parser.parse_args(sys.argv[1:])
 

@@ -95,9 +95,10 @@ def normalize_repeat(test_data, ref_file, optimal_cutoff, ct, cp, ap):
     results_z = None
     results_r = None
     ref_sizes = None
+    results_variance = None
     test_copy = np.copy(test_data)
     for i in range(3):
-        results_z, results_r, ref_sizes = _normalize_once(
+        results_z, results_r, ref_sizes, results_variance = _normalize_once(
             test_data, test_copy, ref_file, optimal_cutoff, ct, cp, ap
         )
 
@@ -105,7 +106,7 @@ def normalize_repeat(test_data, ref_file, optimal_cutoff, ct, cp, ap):
     m_lr = np.nanmedian(np.log2(results_r))
     m_z = np.nanmedian(results_z)
 
-    return results_z, results_r, ref_sizes, m_lr, m_z
+    return results_z, results_r, ref_sizes, results_variance, m_lr, m_z
 
 
 def _normalize_once(test_data, test_copy, ref_file, optimal_cutoff, ct, cp, ap):
@@ -114,6 +115,7 @@ def _normalize_once(test_data, test_copy, ref_file, optimal_cutoff, ct, cp, ap):
     results_z = np.zeros(masked_bins_per_chr_cum[-1])[ct:]
     results_r = np.zeros(masked_bins_per_chr_cum[-1])[ct:]
     ref_sizes = np.zeros(masked_bins_per_chr_cum[-1])[ct:]
+    results_variance = np.zeros(masked_bins_per_chr_cum[-1])[ct:]
     indexes = ref_file["indexes{}".format(ap)]
     distances = ref_file["distances{}".format(ap)]
 
@@ -133,13 +135,15 @@ def _normalize_once(test_data, test_copy, ref_file, optimal_cutoff, ct, cp, ap):
             ref_data = chr_data[index[distances[i] < optimal_cutoff]]
             ref_data = ref_data[ref_data >= 0]
             ref_stdev = np.std(ref_data)
+            ref_var = np.var(ref_data)
             results_z[i2] = (test_data[i] - np.mean(ref_data)) / ref_stdev
             results_r[i2] = test_data[i] / np.median(ref_data)
             ref_sizes[i2] = ref_data.shape[0]
+            results_variance[i2] = ref_var if ref_var > 0 else 1e-6  # Avoid division by zero
             i += 1
             i2 += 1
 
-    return results_z, results_r, ref_sizes
+    return results_z, results_r, ref_sizes, results_variance
 
 
 """

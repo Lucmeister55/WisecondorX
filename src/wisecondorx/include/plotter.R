@@ -30,7 +30,19 @@ gender = input$ref_gender
 beta = as.numeric(input$beta)
 zcutoff = as.numeric(input$zscore)
 ylim = input$ylim
-regions = read.delim(input$regions, header=F, sep="\t", stringsAsFactors=F)
+
+if (!is.null(input$regions) && file.exists(input$regions)) {
+  regions <- tryCatch({
+    read.delim(input$regions, header=F, sep="\t", stringsAsFactors=F)
+  }, error = function(e) {
+    warning("Failed to read regions file. Proceeding without regions.")
+    data.frame()  # empty data frame
+  })
+} else {
+  warning("No regions file provided. Proceeding without regions.")
+  regions <- data.frame()  # empty data frame
+}
+
 plot.title = input$plot_title
 
 if (input$cairo) options(bitmaptype='cairo')
