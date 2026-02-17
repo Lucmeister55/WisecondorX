@@ -125,96 +125,23 @@ def convert_reads(args):
 
 
 def convert_idat(args):
-    infile = args.infile
-    idat_basenames = []
-    out_bins = None
-    out_segments = None
-    out_dir = None
-
-    if os.path.isdir(infile):
-        out_dir = args.outfile
-        for root, _, files in os.walk(infile):
-            for name in files:
-                if name.endswith("_Grn.idat"):
-                    idat_basenames.append(os.path.join(root, name[:-9]))
-        if not idat_basenames:
-            for root, _, files in os.walk(infile):
-                for name in files:
-                    if name.endswith("_Red.idat"):
-                        idat_basenames.append(os.path.join(root, name[:-9]))
-    else:
-        basename = infile
-        if infile.endswith("_Grn.idat"):
-            basename = infile[:-9]
-        elif infile.endswith("_Red.idat"):
-            basename = infile[:-9]
-        elif infile.endswith(".idat"):
-            basename = infile[:-5]
-        idat_basenames = [basename]
-
-        out_bins = args.outfile
-        out_segments = args.epic_segments_out
-        if not out_segments:
-            out_segments = "{}.segments.bed".format(out_bins)
+    out_dir = args.outfile
 
     json_plot = "{}.epic_convert.json".format(args.outfile)
     json_dict = {
         "R_script": str("{}/include/epic_convert.R".format(args.wd)),
         "infile": str(json_plot),
-        "idat_basenames": idat_basenames,
+        "idat_basenames": [],  # R script will find query samples from query_dir
         "binsize": int(args.binsize),
-        "out_bins": str(out_bins) if out_bins else "",
-        "out_segments": str(out_segments) if out_segments else "",
+        "out_bins": "",
+        "out_segments": "",
         "out_dir": str(out_dir) if out_dir else "",
-        "conumee_anno": str(args.conumee_anno),
-        "conumee_ref_m": str(args.conumee_ref_m),
-        "conumee_ref_f": str(args.conumee_ref_f),
-        "epic_gender": str(args.epic_gender) if args.epic_gender else "",
+        "query_dir": str(args.query_dir),
+        "ref_dir": str(args.ref_dir),
+        "detail_regions_file": str(args.detail_regions),
+        "exclude_regions_file": str(args.exclude_regions),
+        "max_query": int(args.max_query) if args.max_query is not None else None,
+        "max_ref": int(args.max_ref) if args.max_ref is not None else None,
     }
 
     exec_R(json_dict)
-
-    def write_epic_npz(bins_path: str, npz_path: str) -> None:
-        rows = []
-        with open(bins_path, "r", newline="") as handle:
-            reader = csv.DictReader(handle, delimiter="\t")
-            for row in reader:
-                if not row:
-                    continue
-                rows.append(row)
-
-        if not rows:
-            return
-
-        chr_vals = []
-        start_vals = []
-        end_vals = []
-        ratio_vals = []
-        n_probes_vals = []
-        for row in rows:
-            chr_vals.append(str(row.get("chr", "")))
-            start_vals.append(int(float(row.get("bin_start", 0))))
-            end_vals.append(int(float(row.get("bin_end", 0))))
-            ratio_vals.append(float(row.get("ratio", "nan")))
-            n_probes_vals.append(int(float(row.get("n_probes", 0))))
-
-        np.savez_compressed(
-            npz_path,
-            chr=np.array(chr_vals, dtype=object),
-            start=np.array(start_vals, dtype=np.int64),
-            end=np.array(end_vals, dtype=np.int64),
-            ratio=np.array(ratio_vals, dtype=np.float64),
-            n_probes=np.array(n_probes_vals, dtype=np.int64),
-        )
-
-    if out_bins:
-        npz_path = os.path.splitext(out_bins)[0] + ".npz"
-        if os.path.exists(out_bins):
-            write_epic_npz(out_bins, npz_path)
-    elif out_dir:
-        for idat_basename in idat_basenames:
-            sample_id = os.path.basename(idat_basename)
-            bins_path = os.path.join(out_dir, "{}.tsv".format(sample_id))
-            npz_path = os.path.join(out_dir, "{}.npz".format(sample_id))
-            if os.path.exists(bins_path):
-                write_epic_npz(bins_path, npz_path)

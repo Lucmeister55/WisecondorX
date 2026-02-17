@@ -32,31 +32,24 @@ from wisecondorx.predict_tools import (
 
 
 def tool_convert(args):
-    logging.info("Starting conversion")
+    logging.info("Starting BAM/CRAM conversion")
     args.wd = str(os.path.dirname(os.path.realpath(__file__)))
 
-    is_idat = False
-    if args.infile.endswith(".idat"):
-        is_idat = True
-    elif os.path.isdir(args.infile):
-        for root, _, files in os.walk(args.infile):
-            if any(name.endswith(".idat") for name in files):
-                is_idat = True
-                break
-
-    if is_idat:
-        if not args.conumee_anno or not args.conumee_ref_m or not args.conumee_ref_f:
-            logging.warning(
-                "Conumee annotation/reference not provided; attempting to use packaged conumeeData references."
-            )
-        convert_idat(args)
-    else:
-        sample, qual_info = convert_reads(args)
-        np.savez_compressed(
-            args.outfile, binsize=args.binsize, sample=sample, quality=qual_info
-        )
+    sample, qual_info = convert_reads(args)
+    np.savez_compressed(
+        args.outfile, binsize=args.binsize, sample=sample, quality=qual_info
+    )
 
     logging.info("Finished conversion")
+
+
+def tool_convert_idat(args):
+    logging.info("Starting IDAT conversion")
+    args.wd = str(os.path.dirname(os.path.realpath(__file__)))
+
+    convert_idat(args)
+
+    logging.info("Finished IDAT conversion")
 
 
 def tool_newref(args):
@@ -346,11 +339,11 @@ def main():
 
     parser_convert = subparsers.add_parser(
         "convert",
-        description="Convert and filter a aligned reads to .npz",
+        description="Convert and filter aligned reads (BAM/CRAM) to .npz",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser_convert.add_argument(
-        "infile", type=str, help="aligned reads input for conversion"
+        "infile", type=str, help="BAM or CRAM aligned reads input for conversion"
     )
     parser_convert.add_argument("outfile", type=str, help="Output .npz file")
     parser_convert.add_argument(
@@ -365,38 +358,56 @@ def main():
     parser_convert.add_argument(
         "--normdup", action="store_true", help="Do not remove duplicates"
     )
-    parser_convert.add_argument(
-        "--conumee-anno",
-        type=str,
-        default=None,
-        help="Conumee annotation RData for EPIC IDAT conversion",
-    )
-    parser_convert.add_argument(
-        "--conumee-ref-m",
-        type=str,
-        default=None,
-        help="Conumee male reference RData for EPIC IDAT conversion",
-    )
-    parser_convert.add_argument(
-        "--conumee-ref-f",
-        type=str,
-        default=None,
-        help="Conumee female reference RData for EPIC IDAT conversion",
-    )
-    parser_convert.add_argument(
-        "--epic-gender",
-        type=str,
-        choices=["F", "M"],
-        default=None,
-        help="Optional gender for EPIC IDAT conversion",
-    )
-    parser_convert.add_argument(
-        "--epic-segments-out",
-        type=str,
-        default=None,
-        help="Optional output path for EPIC segment bed",
-    )
     parser_convert.set_defaults(func=tool_convert)
+
+    parser_convert_idat = subparsers.add_parser(
+        "convert_idat",
+        description="Convert IDAT files to CNV data using conumee2",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_convert_idat.add_argument(
+        "outfile", type=str, help="Output directory for converted samples"
+    )
+    parser_convert_idat.add_argument(
+        "--binsize", type=float, default=5e3, help="Bin size (bp)"
+    )
+    parser_convert_idat.add_argument(
+        "--query-dir",
+        type=str,
+        required=True,
+        help="Directory containing query IDAT files",
+    )
+    parser_convert_idat.add_argument(
+        "--ref-dir",
+        type=str,
+        required=True,
+        help="Directory containing reference IDAT files",
+    )
+    parser_convert_idat.add_argument(
+        "--detail-regions",
+        type=str,
+        required=True,
+        help="Path to detail regions RData file",
+    )
+    parser_convert_idat.add_argument(
+        "--exclude-regions",
+        type=str,
+        required=True,
+        help="Path to exclude regions RData file",
+    )
+    parser_convert_idat.add_argument(
+        "--max-query",
+        type=int,
+        default=None,
+        help="Maximum number of query samples to process",
+    )
+    parser_convert_idat.add_argument(
+        "--max-ref",
+        type=int,
+        default=None,
+        help="Maximum number of reference samples to use",
+    )
+    parser_convert_idat.set_defaults(func=tool_convert_idat)
 
     parser_newref = subparsers.add_parser(
         "newref",
@@ -579,7 +590,10 @@ def main():
 
     parser_epic = subparsers.add_parser(
         "epic-cfrrbs",
-        description="Correlate EPIC array CNVs (IDAT) with cfRRBS (NPZ)",
+        description=(
+            "Correlate EPIC array CNVs with cfRRBS (NPZ). "
+            "Requires precomputed EPIC bins/segments (e.g., from WisecondorX convert)."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser_epic.add_argument(
@@ -596,41 +610,6 @@ def main():
         "outdir",
         type=str,
         help="Output directory for reports and intermediate files",
-    )
-    parser_epic.add_argument(
-        "--max-replicates",
-        type=int,
-        default=None,
-        help="Limit number of sample pairs to process",
-    )
-    parser_epic.add_argument(
-        "--skip-cfrrbs-predict",
-        action="store_true",
-        help="Skip WisecondorX predict if cfRRBS outputs already exist",
-    )
-    parser_epic.add_argument(
-        "--beta",
-        type=float,
-        default=None,
-        help="Optional beta for cfRRBS aberration calling",
-    )
-    parser_epic.add_argument(
-        "--zscore",
-        type=float,
-        default=None,
-        help="Optional z-score for cfRRBS aberration calling",
-    )
-    parser_epic.add_argument(
-        "--blacklist",
-        type=str,
-        default=None,
-        help="Optional blacklist for cfRRBS prediction",
-    )
-    parser_epic.add_argument(
-        "--gender",
-        type=str,
-        choices=["F", "M"],
-        help="Optional forced gender for cfRRBS prediction",
     )
     parser_epic.set_defaults(func=tool_epic_cfrrbs)
 

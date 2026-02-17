@@ -183,6 +183,7 @@ def _plot_scatter(df: pd.DataFrame, out_png: str) -> None:
 
 def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
     logging.info("Starting EPIC vs cfRRBS correlation")
+    logging.info("Expecting precomputed EPIC bins/segments paths in the sample sheet.")
 
     pairs = _read_pairs_from_sheet(args.sample_sheet)
     if args.max_replicates is not None and args.max_replicates > 0:
