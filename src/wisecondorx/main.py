@@ -611,6 +611,20 @@ def main():
         type=str,
         help="Output directory for reports and intermediate files",
     )
+    parser_epic.add_argument(
+        "--blacklist",
+        type=str,
+        default=None,
+        help="Blacklist that masks regions in output, structure of header-less "
+        "file: chr...(/t)startpos(/t)endpos(/n)",
+    )
+    parser_epic.add_argument(
+        "--regions",
+        type=str,
+        default=None,
+        help="List of regions to be marked on the output plot, structure of header-less "
+        "file: chr...(/t)startpos(/t)endpos(/n)name. If not given, no regions will be marked.",
+    )
     parser_epic.set_defaults(func=tool_epic_cfrrbs)
 
     args = parser.parse_args(sys.argv[1:])

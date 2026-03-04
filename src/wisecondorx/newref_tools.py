@@ -5,9 +5,10 @@ import logging
 import random
 
 import numpy as np
-from scipy.signal import argrelextrema
-from sklearn.decomposition import PCA
-from sklearn.mixture import GaussianMixture
+try:
+    from scipy.signal import argrelextrema
+except Exception:
+    argrelextrema = None
 
 """
 A Gaussian mixture model is fitted against
@@ -19,6 +20,12 @@ serve as the cut-off point.
 
 
 def train_gender_model(args, samples):
+    if argrelextrema is None:
+        raise ImportError("scipy.signal.argrelextrema is required for train_gender_model")
+    try:
+        from sklearn.mixture import GaussianMixture
+    except Exception as exc:
+        raise ImportError("sklearn.mixture.GaussianMixture is required for train_gender_model") from exc
     genders = np.empty(len(samples), dtype="object")
     y_fractions = []
     for sample in samples:
@@ -133,6 +140,10 @@ between sample normalization in the test phase.
 
 
 def train_pca(ref_data, pcacomp=5):
+    try:
+        from sklearn.decomposition import PCA
+    except Exception as exc:
+        raise ImportError("sklearn.decomposition.PCA is required for train_pca") from exc
     t_data = ref_data.T
     pca = PCA(n_components=pcacomp)
     pca.fit(t_data)

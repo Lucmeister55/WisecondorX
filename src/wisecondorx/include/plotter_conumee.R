@@ -188,8 +188,8 @@ if (ylim != 'def'){
 
 # Force ylim and y.ticks for conumee-style
 y.ticks <- round(seq(-1.2, 1.2, by=0.4), 1)
-chr.wide.lower.limit <- -1.3
-chr.wide.upper.limit <- 1.3
+chr.wide.lower.limit <- -1.25
+chr.wide.upper.limit <- 1.25
 
 # plot chromosome wide plot
 
@@ -197,24 +197,25 @@ black = "#3f3f3f"
 
 color.segmentLine = "#e0e0e0"
 
-# Conumee-style colors (default)
-color.A  = rgb(150, 150, 150, maxColorValue=255)  # neutral grey
-color.B  = rgb(200, 50, 50, maxColorValue=255)    # loss -> red
-color.C  = rgb(50, 150, 50, maxColorValue=255)    # gain -> green
-color.D  = "darkblue"                            # labels etc
+# Conumee2-style colors
+color.A  = "lightgrey"   # neutral
+color.B  = "red"         # loss
+color.C  = "green"       # gain
+color.D  = "darkblue"    # labels etc
 color.X <- c(rgb(141, 209, 198, maxColorValue=255), rgb(84, 84, 84, maxColorValue=255), rgb(227, 200, 138, maxColorValue=255))
 
 # Transparent versions for segments
-color.AA = rgb(150, 150, 150, 80, maxColorValue=255)
-color.BB = rgb(200, 50, 50, 80, maxColorValue=255)
-color.CC = rgb(50, 150, 50, 80, maxColorValue=255)
+color.AA = adjustcolor(color.A, alpha.f=0.3)
+color.BB = adjustcolor(color.B, alpha.f=0.3)
+color.CC = adjustcolor(color.C, alpha.f=0.3)
 color.XX = c(color.CC, color.AA, color.BB)
 
-png(paste0(out.dir, "/genome_wide.png"), width=21, height=12, units="in",res=512,pointsize=18)
+png(paste0(out.dir, "/genome_wide.png"), width=12, height=6, units="in", res=720, pointsize=12)
 
 # Instead, just plot the top panel for genome-wide plot:
 layout(matrix(1, nrow=1, ncol=1))  # single panel
-par(mar=c(2,2,1,0.5), mgp=c(0.5,0.5,0), oma=c(1,1,0.5,0.5))
+par(mar=c(4,4,4,4), oma=c(0,0,0,0), mgp=c(2,0.7,0))
+par(cex=0.8, cex.axis=1.0, cex.lab=1.0)
 par(xaxs="i")
 
 plot(1, main="", axes=F, # plots nothing -- enables segments function
@@ -244,11 +245,11 @@ for (undetectable.index in which(is.na(ratio))){
 # Set dot colors (conumee-style gradient)
 # -----------------------------
 n.colors <- 1000
-gradient.colors <- colorRampPalette(c("red", "grey80", "green"))(n.colors)
+gradient.colors <- colorRampPalette(c("red", "red", "lightgrey", "green", "green"))(n.colors)
 
-# Set limits for gradient mapping
-max_ratio <- 0.4
-ratio.clipped <- pmax(pmin(ratio, max_ratio), -max_ratio)  # clip values to [-0.4, 0.4]
+# Set limits for gradient mapping based on ylim
+max_ratio <- max(abs(c(chr.wide.lower.limit, chr.wide.upper.limit)))
+ratio.clipped <- pmax(pmin(ratio, max_ratio), -max_ratio)
 
 # Map ratio values to gradient
 dot.cols <- sapply(ratio.clipped, function(x) {
@@ -279,12 +280,12 @@ min_dist <- quantile(ratio_dist, 0.01, na.rm=TRUE)
 max_dist <- quantile(ratio_dist, 0.99, na.rm=TRUE)
 
 if (!is.finite(min_dist) || !is.finite(max_dist) || min_dist == max_dist) {
-  dot.cex <- rep(0.8, length(ratio))
+  dot.cex <- rep(0.7, length(ratio))
 } else {
   ratio_dist_clipped <- pmax(pmin(ratio_dist, max_dist), min_dist)
   dist_scaled <- 1 - (ratio_dist_clipped - min_dist) / (max_dist - min_dist)
   dist_scaled[is.na(dist_scaled)] <- 0.5
-  dot.cex <- 0.2 + 1.2 * (dist_scaled ^ 1.6)
+  dot.cex <- 0.2 + 0.9 * (dist_scaled ^ 1.6)
 }
 
 
@@ -384,11 +385,11 @@ for (i in seq_len(nrow(gene_labels))){
   label_adj = gene_labels$label_adj[i]
   # Overlay a single representative point for the gene region
   points(gene_labels$dot_x[i], gene_labels$dot_y[i],
-    col=color.D, pch=16, cex=1.1, lwd=1)
+    col="black", pch=16, cex=0.85, lwd=1)
     # Add the label
     label_x <- gene_labels$dot_x[i]
     text(label_x, label_position,
-      labels=label, col=color.D, cex=0.85, srt=90, adj=label_adj, font=2)
+      labels=label, col="black", cex=0.8, srt=90, adj=label_adj, font=2)
 }
 
 # Draw x and y axes (conumee-style)
@@ -398,13 +399,14 @@ y_offset <- 0.02 * (par("usr")[4] - par("usr")[3])
 
 # Draw x-axis labels with offset and right-justification
 text(x = chr.mids, 
-     y = par("usr")[3] - y_offset,  # move labels below the ticks
-     labels = labels, 
-     srt = 90, 
-     adj = 1,   # right-justified for vertical text
-     xpd = NA)
-axis(1, at=chr.mids, labels=FALSE, tick=TRUE, tcl=-0.3, las=2)  # x-axis with ticks outward
-axis(2, at=y.ticks, tick=TRUE, tcl=-0.3, las=1)                  # y-axis with ticks outward
+  y = par("usr")[3] - y_offset,  # move labels below the ticks
+  labels = labels, 
+  srt = 90, 
+  adj = 1,   # right-justified for vertical text
+  xpd = NA,
+  cex = 1.0)
+axis(1, at=chr.mids, labels=FALSE, tick=TRUE, tcl=-0.3, las=2, cex.axis=1.0)  # x-axis with ticks outward
+axis(2, at=y.ticks, tick=TRUE, tcl=-0.3, las=1, cex.axis=1.0)                  # y-axis with ticks outward
 box()
 par(xpd=F)
 
@@ -452,7 +454,7 @@ for (ab in input$results_c){
   seg_median <- median(ratio[start:end], na.rm=TRUE)
   # Draw horizontal line at median
   segments(start, seg_median, end, seg_median, col="darkblue", 
-           lwd=9, lty=1)
+           lwd=4, lty=1)
 }
 
 # write image
@@ -469,7 +471,7 @@ ymax <- max(h.whis.per.chr[1:22], na.rm = TRUE)
 filtered.box.list <- lapply(box.list[1:22], function(x) x[x >= ymin & x <= ymax])
 
 # Save autosome boxplot to a separate file
-png(paste0(out.dir, "/autosome_boxplot.png"), width=14, height=10, units="in", res=512, pointsize=18)
+png(paste0(out.dir, "/autosome_boxplot.png"), width=12, height=6, units="in", res=720, pointsize=12)
 
 # Reduce margins: bottom, left, top, right
 par(mar = c(3, 4, 1, 1), mgp = c(2.5, 0.5, 0))  
@@ -510,7 +512,7 @@ if (!genome_only){
       next
     }
 
-    png(paste0(out.dir, "/", labels[c],".png"), width=14,height=10,units="in",res=256,pointsize=18)
+    png(paste0(out.dir, "/", labels[c],".png"), width=12,height=6,units="in",res=720,pointsize=12)
 
     upper.limit <- 0.6 + whis[2]
     lower.limit <- -1.05 + whis[1]
@@ -555,7 +557,7 @@ if (!genome_only){
       # Conumee-style median line for segment
       seg_median <- median(ratio[start:end], na.rm=TRUE)
        segments(start, seg_median, end, seg_median, col="darkblue",
-         lwd=8, lty=1)
+         lwd=3, lty=1)
     }
 
     rect(0, lower.limit - 10, chr.ends[c], upper.limit + 10, col="white", border=NA)
