@@ -23,9 +23,9 @@ def _detect_delimiter(line: str) -> str:
 
 def _read_pairs_from_sheet(sheet_path: str) -> List[Tuple[str, str, str, str]]:
     """
-    Reads sample sheet mapping EPIC samples to conumee RDS files.
-    Expected columns: epic_id, npz_path, rds_path
-    Returns: List of (epic_id, npz_path, cfrrbs_id, rds_path)
+    Reads sample sheet mapping EPIC samples to cfRRBS NPZ and conumee RDS files.
+    Expected columns: epic_id, cfrrbs_npz_path, rds_path
+    Returns: List of (epic_id, cfrrbs_npz_path, cfrrbs_id, rds_path)
     """
     with open(sheet_path, "r") as handle:
         lines = handle.readlines()
@@ -34,8 +34,9 @@ def _read_pairs_from_sheet(sheet_path: str) -> List[Tuple[str, str, str, str]]:
         raise ValueError("Sample sheet is empty")
 
     epic_col_l = "epic_id"
-    cfrrbs_col_l = "npz_path"
+    cfrrbs_col_l = "cfrrbs_npz_path"
     rds_col_l = "rds_path"
+    # sWGS support removed: only require epic_id, cfrrbs_npz_path, rds_path
     header_idx = None
     delimiter = ","
 
@@ -49,30 +50,34 @@ def _read_pairs_from_sheet(sheet_path: str) -> List[Tuple[str, str, str, str]]:
                 break
 
     if header_idx is None:
-        raise ValueError("Could not locate required columns (epic_id, npz_path, rds_path) in sample sheet")
+        raise ValueError("Could not locate required columns (epic_id, cfrrbs_npz_path, rds_path) in sample sheet")
 
     df = pd.read_csv(sheet_path, sep=delimiter, skiprows=header_idx, header=0)
     col_map = {c.lower(): c for c in df.columns}
     if epic_col_l not in col_map or cfrrbs_col_l not in col_map or rds_col_l not in col_map:
-        raise ValueError("Sample sheet is missing required columns (epic_id, npz_path, rds_path)")
+        raise ValueError("Sample sheet is missing required columns (epic_id, cfrrbs_npz_path, rds_path)")
 
     epic_col_real = col_map[epic_col_l]
     cfrrbs_col_real = col_map[cfrrbs_col_l]
     rds_col_real = col_map[rds_col_l]
+    swgs_col_real = None
 
     pairs = []
     for _, row in df.iterrows():
         epic_id = str(row.get(epic_col_real, "")).strip()
         cfrrbs_path = str(row.get(cfrrbs_col_real, "")).strip()
         rds_path = str(row.get(rds_col_real, "")).strip()
+        
         if epic_id.lower() == "nan":
             epic_id = ""
         if cfrrbs_path.lower() == "nan":
             cfrrbs_path = ""
         if rds_path.lower() == "nan":
             rds_path = ""
+        
         if not epic_id or not cfrrbs_path or not rds_path:
             continue
+        
         cfrrbs_id = os.path.splitext(os.path.basename(cfrrbs_path))[0]
         pairs.append((epic_id, cfrrbs_path, cfrrbs_id, rds_path))
 
@@ -1627,38 +1632,38 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
     # ===================================================================
     logging.info("Phase 1: Creating pair folders")
     pair_metadata = []  # Store metadata for each pair for later processing
-    
-    for epic_id, npz_path, cfrrbs_id, rds_path in pairs:
+
+    for epic_id, cfrrbs_path, cfrrbs_id, rds_path in pairs:
         # Validate input files exist
-        if not os.path.exists(npz_path):
-            logging.warning("Missing cfRRBS NPZ file: %s", npz_path)
+        if not os.path.exists(cfrrbs_path):
+            logging.warning("Missing cfRRBS NPZ file: %s", cfrrbs_path)
             continue
         if not os.path.exists(rds_path):
             logging.warning("Missing conumee RDS file: %s", rds_path)
             continue
-        
         # Create sample-specific output directory
         pair_id = f"{epic_id}__{cfrrbs_id}"
         sample_pair_dir = os.path.join(samples_dir, pair_id)
         os.makedirs(sample_pair_dir, exist_ok=True)
-
         epic_dir = os.path.join(sample_pair_dir, "epic")
         cfrrbs_dir = os.path.join(sample_pair_dir, "cfrrbs")
+
         os.makedirs(epic_dir, exist_ok=True)
         os.makedirs(cfrrbs_dir, exist_ok=True)
         
         # Collect metadata for later processing
-        pair_metadata.append({
+        metadata = {
             "epic_id": epic_id,
             "cfrrbs_id": cfrrbs_id,
             "pair_id": pair_id,
-            "npz_path": npz_path,
+            "cfrrbs_path": cfrrbs_path,
             "rds_path": rds_path,
             "sample_pair_dir": sample_pair_dir,
             "epic_dir": epic_dir,
             "cfrrbs_dir": cfrrbs_dir,
-        })
-
+        }
+        pair_metadata.append(metadata)
+    
     logging.info(f"Created folders for {len(pair_metadata)} pairs")
     
     if not pair_metadata:
@@ -1683,6 +1688,8 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 except Exception as e:
                     logging.debug(f"Could not remove focal output {p}: {e}")
 
+    # Note: sWGS support removed — no Phase 2.5 processing
+
     # ===================================================================
     # PHASE 3: Process each pair's cfRRBS data and correlations
     # ===================================================================
@@ -1697,7 +1704,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         epic_id = metadata["epic_id"]
         cfrrbs_id = metadata["cfrrbs_id"]
         pair_id = metadata["pair_id"]
-        npz_path = metadata["npz_path"]
+        cfrrbs_path = metadata["cfrrbs_path"]
         rds_path = metadata["rds_path"]
         sample_pair_dir = metadata["sample_pair_dir"]
         epic_dir = metadata["epic_dir"]
@@ -1710,7 +1717,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
 
         logging.info(f"Running WisecondorX predict for {cfrrbs_id}")
         _run_cfrrbs_predict(
-            npz_path,
+            cfrrbs_path,
             args.reference,
             temp_outid,
             blacklist=getattr(args, "blacklist", None),
@@ -1731,6 +1738,8 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
 
         logging.debug(f"Loaded cfRRBS: {len(cf_bins)} bins, chrs={sorted(cf_bins['chr'].unique().tolist())}")
         logging.debug(f"Loaded EPIC: {len(epic_bins)} bins, chrs={sorted(epic_bins['chr'].unique().tolist())}")
+
+        # sWGS support removed — skip sWGS loading
 
         # Aggregate EPIC bins to cfRRBS bin boundaries for better pairing
         logging.debug(f"Aggregating {len(epic_bins)} EPIC bins to {len(cf_bins)} cfRRBS bin boundaries")
@@ -2271,22 +2280,38 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         if cfrrbs_subdirs:
             cfrrbs_plot_path = os.path.join(cfrrbs_dir, cfrrbs_subdirs[0], "genome_wide.png")
             epic_plot_path = os.path.join(epic_dir, "CNV_genomeplot.png")
-            stacked_path = os.path.join(sample_pair_dir, "genomewide_stacked.png")
+            
+            # For 2-tech: EPIC + cfRRBS
+            stacked_path_2tech = os.path.join(sample_pair_dir, "genomewide_stacked_2tech.png")
             if os.path.exists(epic_plot_path) and os.path.exists(cfrrbs_plot_path):
                 try:
                     _stack_pair_plots(
                         epic_plot_path,
                         cfrrbs_plot_path,
-                        stacked_path,
+                        stacked_path_2tech,
                         title=f"EPIC vs cfRRBS - {pair_id}",
                     )
                 except Exception as e:
-                    logging.warning(f"Failed to create stacked plot for {pair_id}: {e}")
+                    logging.warning(f"Failed to create 2-tech stacked plot for {pair_id}: {e}")
+            
+            # Keep current "genomewide_stacked.png" as the 2-tech version for backward compatibility
+            stacked_path = os.path.join(sample_pair_dir, "genomewide_stacked.png")
+            if os.path.exists(stacked_path_2tech) and not os.path.exists(stacked_path):
+                try:
+                    import shutil
+                    shutil.copy(stacked_path_2tech, stacked_path)
+                except Exception as e:
+                    logging.debug(f"Could not copy 2-tech plot to stacked.png: {e}")
 
     # ===================================================================
     # Final report generation
     # ===================================================================
     logging.info("Phase 4: Writing final reports")
+    
+    # Create sub-summary directory for processed pairs
+    summary_2tech_dir = os.path.join(summary_dir, "2tech_only")
+    if report_rows:
+        os.makedirs(summary_2tech_dir, exist_ok=True)
     
     # Generate summary gene boxplot across all samples
     if all_gene_data:
@@ -2296,11 +2321,19 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         except Exception as e:
             logging.warning(f"Failed to create gene summary boxplot: {e}")
     
-    # Generate compact correlation summary visualization
+    # Generate compact correlation summary visualization (all)
     if report_rows:
         try:
             _plot_correlation_summary(report_rows, summary_dir)
             logging.info("Correlation summary plot written to summary folder")
+        except Exception as e:
+            logging.warning(f"Failed to create correlation summary plot: {e}")
+    
+    # Generate correlation summary for all processed pairs
+    if report_rows:
+        try:
+            _plot_correlation_summary(report_rows, summary_2tech_dir)
+            logging.info("Correlation summary plot written to 2tech_only subfolder")
         except Exception as e:
             logging.warning(f"Failed to create correlation summary plot: {e}")
     
@@ -2312,5 +2345,5 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         except Exception as e:
             logging.warning(f"Failed to create gene reproducibility report: {e}")
     
-    logging.info("EPIC vs cfRRBS pipeline completed successfully")
+    logging.info(f"EPIC vs cfRRBS pipeline completed successfully ({len(report_rows)} pairs)")
 
