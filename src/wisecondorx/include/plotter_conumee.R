@@ -32,6 +32,9 @@ gender = input$ref_gender
 beta = as.numeric(input$beta)
 zcutoff = as.numeric(input$zscore)
 ylim = input$ylim
+gene_call_method = if (!is.null(input$gene_call_method) && input$gene_call_method != "NULL") input$gene_call_method else "conumee"
+gene_call_thr_gain = if (!is.null(input$gene_call_thr_gain) && input$gene_call_thr_gain != "NULL") as.numeric(input$gene_call_thr_gain) else NULL
+gene_call_thr_loss = if (!is.null(input$gene_call_thr_loss) && input$gene_call_thr_loss != "NULL") as.numeric(input$gene_call_thr_loss) else NULL
 
 if (!is.null(input$regions) && file.exists(input$regions)) {
   regions <- tryCatch({
@@ -197,6 +200,10 @@ black = "#3f3f3f"
 
 color.segmentLine = "#e0e0e0"
 
+# Chromosome separator and centromere colors/styles
+chr_sep_col <- "#bdbdbd"  # solid grey for chromosome separators
+cent_col <- "#9e9e9e"     # dashed grey for centromeres
+
 # Conumee2-style colors
 color.A  = "lightgrey"   # neutral
 color.B  = "red"         # loss
@@ -223,9 +230,7 @@ plot(1, main="", axes=F, # plots nothing -- enables segments function
      cex=0, ylim=c(chr.wide.lower.limit,chr.wide.upper.limit))
 
 plot.constitutionals <- function(ploidy, start, end){
-  segments(start, log2(1/ploidy), end, log2(1/ploidy), col=color.B, lwd=2, lty=3)
   segments(start, log2(2/ploidy), end, log2(2/ploidy), col=color.A, lwd=2, lty=3)
-  segments(start, log2(3/ploidy), end, log2(3/ploidy), col=color.C, lwd=2, lty=3)
 }
 
 genome.len <- chr.ends[length(chr.ends)]
@@ -238,7 +243,15 @@ if (gender == "F"){
 }
 
 for (undetectable.index in which(is.na(ratio))){
-  segments(undetectable.index, chr.wide.lower.limit, undetectable.index, chr.wide.upper.limit, col="#e0e0e0", lwd=0.1, lty=1)
+  segments(undetectable.index, par("usr")[3], undetectable.index, par("usr")[4], col="#e0e0e0", lwd=0.1, lty=1)
+}
+
+# Draw chromosome separator lines behind all overlays so they do not cover labels/segments
+# Use plot extremes so lines reach top and bottom edges
+y_bot <- par("usr")[3]
+y_top <- par("usr")[4]
+for (x in chr.ends){
+  segments(x, y_bot, x, y_top, col=chr_sep_col, lwd=1.0, lty=1)
 }
 
 # -----------------------------
@@ -283,14 +296,47 @@ if (!is.finite(min_dist) || !is.finite(max_dist) || min_dist == max_dist) {
   dot.cex <- rep(0.7, length(ratio))
 } else {
   ratio_dist_clipped <- pmax(pmin(ratio_dist, max_dist), min_dist)
+  # Relative distance (sample-specific) and absolute distance (axis-referenced)
+  # are blended so high-spread samples shrink dots more aggressively.
   dist_scaled <- 1 - (ratio_dist_clipped - min_dist) / (max_dist - min_dist)
-  dist_scaled[is.na(dist_scaled)] <- 0.5
-  dot.cex <- 0.2 + 0.9 * (dist_scaled ^ 1.6)
+  spread_range <- max_dist - min_dist
+  spread_norm <- pmin(pmax(spread_range / max_ratio, 0), 2)
+  w_abs <- pmin(0.85, 0.20 + 0.35 * spread_norm)
+  abs_scaled <- 1 - pmin(ratio_dist_clipped / max_ratio, 1)
+  combined_scaled <- (1 - w_abs) * dist_scaled + w_abs * abs_scaled
+  combined_scaled[is.na(combined_scaled)] <- 0.5
+
+  # Increase non-linearity with spread to accelerate shrinkage in noisy samples.
+  power <- 1.6 + 1.2 * spread_norm
+  dot.cex <- 0.15 + 0.95 * (combined_scaled ^ power)
 }
 
 
 # create labels dataframe
 gene_labels <- data.frame(start_bin=integer(), end_bin=integer(), label=character(), label_position=double(), label_adj=integer(), dot_x=double(), dot_y=double())
+
+# Load amplified and deleted genes from TSV files if they exist
+amplified_genes <- character(0)
+deleted_genes <- character(0)
+outid_base <- gsub("\\.plots$", "", out.dir)
+amp_file <- paste0(outid_base, "_amplified_genes.tsv")
+del_file <- paste0(outid_base, "_deleted_genes.tsv")
+if (file.exists(amp_file)) {
+  tryCatch({
+    amp_df <- read.delim(amp_file, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+    if (nrow(amp_df) > 0 && "name" %in% colnames(amp_df)) {
+      amplified_genes <- unique(trimws(amp_df$name))
+    }
+  }, error = function(e) {})
+}
+if (file.exists(del_file)) {
+  tryCatch({
+    del_df <- read.delim(del_file, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+    if (nrow(del_df) > 0 && "name" %in% colnames(del_df)) {
+      deleted_genes <- unique(trimws(del_df$name))
+    }
+  }, error = function(e) {})
+}
 
 append_labels_from_regions <- function(regions_df) {
   if (nrow(regions_df) == 0) return(invisible(NULL))
@@ -371,10 +417,27 @@ append_labels_from_regions(regions)
 colnames(gene_labels) <- c("start_bin", "end_bin", "label",
                            "label_position", "label_adj", "dot_x", "dot_y")
 
+# Draw gene-call threshold lines BEFORE points if provided and using segment-wise method (behind points)
+if (gene_call_method == "segment-wise") {
+  if (!is.null(gene_call_thr_gain) && is.finite(gene_call_thr_gain)) {
+    segments(chr.ends[1], gene_call_thr_gain, chr.ends[length(chr.ends)], gene_call_thr_gain,
+             col=adjustcolor("black", alpha.f=0.9), lwd=1.5, lty=2)  # green for gain
+  }
+  if (!is.null(gene_call_thr_loss) && is.finite(gene_call_thr_loss)) {
+    segments(chr.ends[1], gene_call_thr_loss, chr.ends[length(chr.ends)], gene_call_thr_loss,
+             col=adjustcolor("black", alpha.f=0.9), lwd=1.5, lty=2)  # red for loss
+  }
+}
+
 par(new=T)
 plot(ratio, main="", axes=F,
      xlab="", ylab="", col=dot.cols, pch=16,
      ylim=c(chr.wide.lower.limit,chr.wide.upper.limit), cex=dot.cex)
+
+# Determine aberration cutoffs for highlighting labels
+cutoffs <- get.aberration.cutoff(beta, 2)
+loss_cutoff <- cutoffs[1]
+gain_cutoff <- cutoffs[2]
 
 # Plot gene labels
 for (i in seq_len(nrow(gene_labels))){
@@ -383,13 +446,54 @@ for (i in seq_len(nrow(gene_labels))){
   label = gene_labels$label[i]
   label_position = gene_labels$label_position[i]
   label_adj = gene_labels$label_adj[i]
+  
+  # Get actual dot position and value
+  dot_x <- gene_labels$dot_x[i]
+  dot_y <- gene_labels$dot_y[i]
+  
+  # Check if dot is beyond chr.wide scale limits
+  if (dot_y < chr.wide.lower.limit) {
+    # Dot is below lower limit - clamp to lower edge
+    clamped_dot_y <- chr.wide.lower.limit
+    label_y <- chr.wide.lower.limit - 0.08
+    is_clamped <- TRUE
+  } else if (dot_y > chr.wide.upper.limit) {
+    # Dot is above upper limit - clamp to upper edge
+    clamped_dot_y <- chr.wide.upper.limit
+    label_y <- chr.wide.upper.limit + 0.08
+    is_clamped <- TRUE
+  } else {
+    # Dot is within scale limits
+    clamped_dot_y <- dot_y
+    label_y <- label_position
+    is_clamped <- FALSE
+  }
+  
   # Overlay a single representative point for the gene region
-  points(gene_labels$dot_x[i], gene_labels$dot_y[i],
+  points(dot_x, clamped_dot_y,
     col="black", pch=16, cex=0.85, lwd=1)
-    # Add the label
-    label_x <- gene_labels$dot_x[i]
-    text(label_x, label_position,
-      labels=label, col="black", cex=0.8, srt=90, adj=label_adj, font=2)
+  
+  # Add the label: color based on gene call status (green=amplified, red=deleted, black=neutral)
+  gene_name <- gene_labels$label[i]
+  if (gene_name %in% amplified_genes) {
+    lab_col <- "darkgreen"
+  } else if (gene_name %in% deleted_genes) {
+    lab_col <- adjustcolor("#B30000", alpha.f=0.95)  # darker red, more opaque
+  } else {
+    lab_col <- "black"
+  }
+  
+  text(dot_x, label_y,
+    labels=label, col=lab_col, cex=1.1, srt=90, adj=0.5, font=1)
+  
+  # Add true log2 ratio as small text if clamped
+  if (is_clamped) {
+    ratio_text <- sprintf("%.2f", dot_y)
+    par(xpd=NA)
+    text(dot_x + 1.5, label_y,
+      labels=ratio_text, col=lab_col, cex=0.7, font=1)
+    par(xpd=F)
+  }
 }
 
 # Draw x and y axes (conumee-style)
@@ -410,9 +514,7 @@ axis(2, at=y.ticks, tick=TRUE, tcl=-0.3, las=1, cex.axis=1.0)                  #
 box()
 par(xpd=F)
 
-for (x in chr.ends){
-  segments(x, chr.wide.lower.limit * 1.03, x, chr.wide.upper.limit * 1.03, col=black, lwd=1.2, lty=3)
-}
+## Chromosome separators drawn earlier so they are behind overlays
 
 # Legends
 
@@ -537,7 +639,7 @@ if (!genome_only){
     }
 
     for (undetectable.index in which(is.na(ratio))){
-      segments(undetectable.index, lower.limit, undetectable.index, upper.limit,
+      segments(undetectable.index, par("usr")[3], undetectable.index, par("usr")[4],
               col=color.A, lwd=1/len * 200, lty=1)
     }
 
@@ -569,12 +671,43 @@ if (!genome_only){
       label = gene_labels$label[i]
       label_position = gene_labels$label_position[i]
       label_adj = gene_labels$label_adj[i]
-      # Overlay the points for the gene region
-      points(seq(start_bin, end_bin), ratio[start_bin:end_bin], col=color.D, pch=16, cex=1.1, lwd=1)
+      
+      # Get actual dot position and value
+      dot_x <- gene_labels$dot_x[i]
+      dot_y <- gene_labels$dot_y[i]
+      
+      # Check if dot is beyond chromosome-specific scale limits
+      if (dot_y < lower.limit) {
+        # Dot is below lower limit - clamp to lower edge
+        clamped_dot_y <- lower.limit
+        label_y <- lower.limit - 0.08 * (upper.limit - lower.limit)
+        is_clamped <- TRUE
+      } else if (dot_y > upper.limit) {
+        # Dot is above upper limit - clamp to upper edge
+        clamped_dot_y <- upper.limit
+        label_y <- upper.limit + 0.08 * (upper.limit - lower.limit)
+        is_clamped <- TRUE
+      } else {
+        # Dot is within scale limits
+        clamped_dot_y <- dot_y
+        label_y <- label_position
+        is_clamped <- FALSE
+      }
+      
+      # Overlay the representative point for the gene region
+      points(dot_x, clamped_dot_y, col=color.D, pch=16, cex=1.1, lwd=1)
+      
       # Add the label
       par(xpd=NA)
-      text(start_bin + (end_bin - start_bin) / 2, label_position,
-          labels=label, col=color.D, cex=0.9, srt=90, adj=label_adj)
+      text(dot_x, label_y,
+          labels=label, col=color.D, cex=1.05, srt=90, adj=0.5)
+      
+      # Add true log2 ratio as small text if clamped
+      if (is_clamped) {
+        ratio_text <- sprintf("%.2f", dot_y)
+        text(dot_x + 1.5, label_y,
+          labels=ratio_text, col=color.D, cex=0.65)
+      }
       par(xpd=F)
   } 
 

@@ -20,6 +20,8 @@ detail_regions_file <- input$detail_regions_file
 exclude_regions_file <- input$exclude_regions_file
 max_query <- input$max_query
 max_ref <- input$max_ref
+genome <- input$genome
+if (is.null(genome) || !genome %in% c("hg19", "hg38")) genome <- "hg19"
 
 is_missing_path <- function(x) {
   is.null(x) || !nzchar(x) || x %in% c("NULL", "None", "NA", "null")
@@ -94,7 +96,7 @@ if (!is_missing_path(exclude_regions_file) && file.exists(exclude_regions_file))
 }
 
 # Create annotation
-anno_new <- CNV.create_anno(array_type = c("450k", "EPIC"), exclude_regions = exclude_regions, detail_regions = detail_regions)
+anno_new <- CNV.create_anno(array_type = c("450k", "EPIC"), exclude_regions = exclude_regions, detail_regions = detail_regions, genome = genome)
 message("Annotation created successfully")
 
 # Process samples

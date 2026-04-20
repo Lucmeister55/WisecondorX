@@ -407,6 +407,13 @@ def main():
         default=None,
         help="Maximum number of reference samples to use",
     )
+    parser_convert_idat.add_argument(
+        "--genome",
+        type=str,
+        choices=["hg19", "hg38"],
+        default="hg19",
+        help="Genome assembly for CNV.create_anno",
+    )
     parser_convert_idat.set_defaults(func=tool_convert_idat)
 
     parser_newref = subparsers.add_parser(
@@ -586,6 +593,31 @@ def main():
         help="Optional BED file of loci to keep for plotting. Only bins overlapping these loci are plotted. "
         "Useful to restrict cfRRBS plots to EPIC probe loci for fair comparison.",
     )
+    parser_test.add_argument(
+        "--gene-call-thr-gain",
+        type=float,
+        default=None,
+        help="Log2 ratio threshold for calling genes in gain regions. "
+        "If provided (e.g., 0.3), segments with log2ratio >= this threshold are considered deviant for gene calling. "
+        "Separate from aberrant segment definition (--zscore/--beta). Only used when --regions file is provided.",
+    )
+    parser_test.add_argument(
+        "--gene-call-thr-loss",
+        type=float,
+        default=None,
+        help="Log2 ratio threshold for calling genes in loss regions. "
+        "If provided (e.g., -0.3), segments with log2ratio <= this threshold are considered deviant for gene calling. "
+        "Separate from aberrant segment definition (--zscore/--beta). Only used when --regions file is provided.",
+    )
+    parser_test.add_argument(
+        "--gene-call-method",
+        type=str,
+        choices=["conumee", "segment-wise"],
+        default=None,
+        help="Method for calling genes: 'conumee' uses zscore/beta thresholds and weighted regional ratios; "
+        "'segment-wise' calls based on whether segments overlap deviant regions defined by --gene-call-thr-gain/loss. "
+        "Only used when --regions file is provided. If not specified and --regions is given, conumee method is used by default.",
+    )
     parser_test.set_defaults(func=tool_test)
 
     parser_epic = subparsers.add_parser(
@@ -612,6 +644,12 @@ def main():
         help="Output directory for reports and intermediate files",
     )
     parser_epic.add_argument(
+        "--max-replicates",
+        type=int,
+        default=None,
+        help="Only process and summarize the first N eligible EPIC/cfRRBS pairs",
+    )
+    parser_epic.add_argument(
         "--blacklist",
         type=str,
         default=None,
@@ -624,6 +662,34 @@ def main():
         default=None,
         help="List of regions to be marked on the output plot, structure of header-less "
         "file: chr...(/t)startpos(/t)endpos(/n)name. If not given, no regions will be marked.",
+    )
+    parser_epic.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="If set, remove existing contents of the output directory before writing",
+    )
+    parser_epic.add_argument(
+        "--gene-call-method",
+        type=str,
+        choices=["conumee", "segment-wise"],
+        default="conumee",
+        help="Method for calling gene gains/deletions: 'conumee' uses ratio thresholds and states; 'segment-wise' calls based on overlapping with aberrant segments",
+    )
+    parser_epic.add_argument(
+        "--gene-call-thr-gain",
+        type=float,
+        default=None,
+        help="log2ratio threshold for calling genes as amplified/gained (segment-wise method only). "
+        "If set, segments with ratio >= this threshold are marked as deviant gains. "
+        "If not set, no segment-wise gain calling is performed.",
+    )
+    parser_epic.add_argument(
+        "--gene-call-thr-loss",
+        type=float,
+        default=None,
+        help="log2ratio threshold for calling genes as deleted/lost (segment-wise method only). "
+        "If set, segments with ratio <= this threshold are marked as deviant losses. "
+        "If not set, no segment-wise loss calling is performed.",
     )
     parser_epic.set_defaults(func=tool_epic_cfrrbs)
 

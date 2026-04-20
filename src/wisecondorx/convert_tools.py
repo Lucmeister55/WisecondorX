@@ -142,6 +142,7 @@ def convert_idat(args):
         "exclude_regions_file": str(args.exclude_regions),
         "max_query": int(args.max_query) if args.max_query is not None else None,
         "max_ref": int(args.max_ref) if args.max_ref is not None else None,
+        "genome": str(args.genome),
     }
 
     exec_R(json_dict)

@@ -28,7 +28,36 @@ if (!dir.exists(summary_dir)) {
 }
 
 # Load all RDS files
-conumee_list <- list()
+# Keep strict positional indexing so duplicate epic_ids do not overwrite entries.
+conumee_list <- vector("list", length(rds_files))
+sample_keys <- make.unique(epic_ids, sep = "__dup")
+names(conumee_list) <- sample_keys
+
+# Persist a pre-loop audit table so each iteration mapping can be inspected later.
+iter_map <- data.frame(
+  iter_idx = seq_along(rds_files),
+  epic_id = as.character(epic_ids),
+  sample_key = as.character(sample_keys),
+  rds_file = as.character(rds_files),
+  out_dir = as.character(out_dirs),
+  stringsAsFactors = FALSE
+)
+iter_map$rds_exists <- file.exists(iter_map$rds_file)
+iter_map$out_dir_exists_pre <- dir.exists(iter_map$out_dir)
+iter_map$epic_id_duplicate <- duplicated(iter_map$epic_id) | duplicated(iter_map$epic_id, fromLast = TRUE)
+iter_map$sample_key_duplicate <- duplicated(iter_map$sample_key) | duplicated(iter_map$sample_key, fromLast = TRUE)
+iter_map$rds_basename <- basename(iter_map$rds_file)
+iter_map$out_dir_basename <- basename(iter_map$out_dir)
+
+iter_map_path <- file.path(summary_dir, "epic_iteration_input_map.tsv")
+write.table(iter_map, file = iter_map_path, sep = "\t", row.names = FALSE, quote = FALSE)
+cat(paste("Saved EPIC iteration input map to", iter_map_path, "\n"))
+
+dup_count <- sum(iter_map$epic_id_duplicate, na.rm = TRUE)
+if (dup_count > 0) {
+  cat(paste("Warning:", dup_count, "rows have duplicated epic_id values; inspect epic_iteration_input_map.tsv\n"))
+}
+
 tryCatch({
   for (i in seq_along(rds_files)) {
     rds_path <- rds_files[i]
@@ -39,7 +68,7 @@ tryCatch({
     }
     
     x <- readRDS(rds_path)
-    conumee_list[[epic_id]] <- x
+    conumee_list[[i]] <- x
     cat(paste("Loaded RDS:", epic_id, "\n"))
   }
   
@@ -221,7 +250,7 @@ tryCatch({
       # Rebuild seg$summary by combining all individual samples
       all_summaries <- list()
       for (j in seq_along(conumee_list)) {
-        sample_name <- epic_ids[j]
+        sample_name <- sample_keys[j]
         if (!is.null(conumee_list[[j]]@seg$summary[[1]])) {
           all_summaries[[sample_name]] <- conumee_list[[j]]@seg$summary[[1]]
         }
@@ -234,7 +263,7 @@ tryCatch({
       if (!is.null(combined@seg$p)) {
         all_p <- list()
         for (j in seq_along(conumee_list)) {
-          sample_name <- epic_ids[j]
+          sample_name <- sample_keys[j]
           if (!is.null(conumee_list[[j]]@seg$p[[1]])) {
             all_p[[sample_name]] <- conumee_list[[j]]@seg$p[[1]]
           }
@@ -249,7 +278,7 @@ tryCatch({
       all_bin_variance <- list()
       all_shifts <- c()
       for (j in seq_along(conumee_list)) {
-        sample_name <- epic_ids[j]
+        sample_name <- sample_keys[j]
         if (!is.null(conumee_list[[j]]@bin$ratio[[1]])) {
           all_bin_ratios[[sample_name]] <- conumee_list[[j]]@bin$ratio[[1]]
           all_bin_variance[[sample_name]] <- conumee_list[[j]]@bin$variance[[1]]
