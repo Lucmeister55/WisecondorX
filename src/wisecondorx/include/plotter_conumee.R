@@ -447,52 +447,43 @@ for (i in seq_len(nrow(gene_labels))){
   label_position = gene_labels$label_position[i]
   label_adj = gene_labels$label_adj[i]
   
-  # Get actual dot position and value
   dot_x <- gene_labels$dot_x[i]
   dot_y <- gene_labels$dot_y[i]
   
   # Check if dot is beyond chr.wide scale limits
-  if (dot_y < chr.wide.lower.limit) {
-    # Dot is below lower limit - clamp to lower edge
-    clamped_dot_y <- chr.wide.lower.limit
-    label_y <- chr.wide.lower.limit - 0.08
-    is_clamped <- TRUE
-  } else if (dot_y > chr.wide.upper.limit) {
-    # Dot is above upper limit - clamp to upper edge
-    clamped_dot_y <- chr.wide.upper.limit
-    label_y <- chr.wide.upper.limit + 0.08
-    is_clamped <- TRUE
-  } else {
-    # Dot is within scale limits
-    clamped_dot_y <- dot_y
-    label_y <- label_position
-    is_clamped <- FALSE
-  }
-  
-  # Overlay a single representative point for the gene region
-  points(dot_x, clamped_dot_y,
-    col="black", pch=16, cex=0.85, lwd=1)
-  
-  # Add the label: color based on gene call status (green=amplified, red=deleted, black=neutral)
-  gene_name <- gene_labels$label[i]
-  if (gene_name %in% amplified_genes) {
-    lab_col <- "darkgreen"
-  } else if (gene_name %in% deleted_genes) {
-    lab_col <- adjustcolor("#B30000", alpha.f=0.95)  # darker red, more opaque
-  } else {
-    lab_col <- "black"
-  }
-  
-  text(dot_x, label_y,
-    labels=label, col=lab_col, cex=1.1, srt=90, adj=0.5, font=1)
-  
-  # Add true log2 ratio as small text if clamped
-  if (is_clamped) {
+  if (dot_y < chr.wide.lower.limit || dot_y > chr.wide.upper.limit) {
+    # Out of bounds: clamp dot to edge and place label outside
+    clamped_dot_y <- pmax(pmin(dot_y, chr.wide.upper.limit + 0.05), chr.wide.lower.limit - 0.05)
+    
+    # Overlay clamped point at edge
+    points(dot_x, clamped_dot_y, col="black", pch=16, cex=1.1, lwd=1)
+    
+    # Place label offset to the right of the dot and vertically offset outside the edge
+    y_offset <- 0.075 * (chr.wide.upper.limit - chr.wide.lower.limit)
+    x_offset <- 0.15
     ratio_text <- sprintf("%.2f", dot_y)
+    label_with_ratio <- paste0(label, " (", ratio_text, ")")
+    
+    if (dot_y < chr.wide.lower.limit) {
+      # Bottom edge (value is below): label below the edge with down arrow
+      label_y <- chr.wide.lower.limit - y_offset
+      label_text <- paste0("↓ ", label_with_ratio)
+    } else {
+      # Top edge (value is above): label above the edge with up arrow
+      label_y <- chr.wide.upper.limit + y_offset
+      label_text <- paste0("↑ ", label_with_ratio)
+    }
+    
     par(xpd=NA)
-    text(dot_x + 1.5, label_y,
-      labels=ratio_text, col=lab_col, cex=0.7, font=1)
+    text(dot_x + x_offset, label_y,
+      labels=label_text, col="black", cex=0.85, srt=0, adj=0, font=2)
     par(xpd=F)
+  } else {
+    # Within bounds: use original logic
+    points(dot_x, dot_y, col="black", pch=16, cex=1.1, lwd=1)
+    
+    text(dot_x, label_position,
+      labels=label, col="black", cex=0.85, srt=90, adj=label_adj, font=2)
   }
 }
 
@@ -672,43 +663,46 @@ if (!genome_only){
       label_position = gene_labels$label_position[i]
       label_adj = gene_labels$label_adj[i]
       
-      # Get actual dot position and value
-      dot_x <- gene_labels$dot_x[i]
+      dot_x <- start_bin + (end_bin - start_bin) / 2
       dot_y <- gene_labels$dot_y[i]
       
-      # Check if dot is beyond chromosome-specific scale limits
-      if (dot_y < lower.limit) {
-        # Dot is below lower limit - clamp to lower edge
-        clamped_dot_y <- lower.limit
-        label_y <- lower.limit - 0.08 * (upper.limit - lower.limit)
-        is_clamped <- TRUE
-      } else if (dot_y > upper.limit) {
-        # Dot is above upper limit - clamp to upper edge
-        clamped_dot_y <- upper.limit
-        label_y <- upper.limit + 0.08 * (upper.limit - lower.limit)
-        is_clamped <- TRUE
-      } else {
-        # Dot is within scale limits
-        clamped_dot_y <- dot_y
-        label_y <- label_position
-        is_clamped <- FALSE
-      }
+      # Overlay the points for the gene region
+      points(seq(start_bin, end_bin), ratio[start_bin:end_bin], col="black", pch=16, cex=1.1, lwd=1)
       
-      # Overlay the representative point for the gene region
-      points(dot_x, clamped_dot_y, col=color.D, pch=16, cex=1.1, lwd=1)
-      
-      # Add the label
-      par(xpd=NA)
-      text(dot_x, label_y,
-          labels=label, col=color.D, cex=1.05, srt=90, adj=0.5)
-      
-      # Add true log2 ratio as small text if clamped
-      if (is_clamped) {
+      # Check if dot is beyond chromosome scale limits
+      if (dot_y < lower.limit || dot_y > upper.limit) {
+        # Out of bounds: clamp dot to edge and place label outside
+        clamped_dot_y <- pmax(pmin(dot_y, upper.limit), lower.limit)
+        
+        # Overlay clamped point at edge
+        points(dot_x, clamped_dot_y, col="black", pch=16, cex=1.2, lwd=1.5)
+        
+        # Place label offset outside the edge
+        label_offset <- 0.02 * (upper.limit - lower.limit)
+        if (dot_y < lower.limit) {
+          # Bottom edge: label below
+          label_y <- lower.limit - label_offset
+          label_adj_out <- 1  # Below
+        } else {
+          # Top edge: label above
+          label_y <- upper.limit + label_offset
+          label_adj_out <- 0  # Above
+        }
+        
         ratio_text <- sprintf("%.2f", dot_y)
-        text(dot_x + 1.5, label_y,
-          labels=ratio_text, col=color.D, cex=0.65)
+        label_with_ratio <- paste0(label, " (", ratio_text, ")")
+        
+        par(xpd=NA)
+        text(dot_x, label_y,
+          labels=label_with_ratio, col="black", cex=1.05, srt=90, adj=label_adj_out, font=2)
+        par(xpd=F)
+      } else {
+        # Within bounds: use original label logic
+        par(xpd=NA)
+        text(dot_x, label_position,
+            labels=label, col="black", cex=1.05, srt=90, adj=label_adj)
+        par(xpd=F)
       }
-      par(xpd=F)
   } 
 
     par(xpd=NA)
