@@ -49,9 +49,7 @@ iter_map$sample_key_duplicate <- duplicated(iter_map$sample_key) | duplicated(it
 iter_map$rds_basename <- basename(iter_map$rds_file)
 iter_map$out_dir_basename <- basename(iter_map$out_dir)
 
-iter_map_path <- file.path(summary_dir, "epic_iteration_input_map.tsv")
-write.table(iter_map, file = iter_map_path, sep = "\t", row.names = FALSE, quote = FALSE)
-cat(paste("Saved EPIC iteration input map to", iter_map_path, "\n"))
+
 
 dup_count <- sum(iter_map$epic_id_duplicate, na.rm = TRUE)
 if (dup_count > 0) {

@@ -68,6 +68,15 @@ def exec_write_plots(rem_input, results, conumee=False):
     if rem_input["args"].add_plot_title:
         json_dict["plot_title"] = str(os.path.basename(rem_input["args"].outid))
 
+    # Persist a copy so the plotter can be re-run after gene calling (focal/broad coloring).
+    try:
+        import json as _json
+        plots_dir = "{}.plots".format(rem_input["args"].outid)
+        os.makedirs(plots_dir, exist_ok=True)
+        _json.dump(json_dict, open(os.path.join(plots_dir, "plot_input.json"), "w"))
+    except Exception:
+        pass
+
     exec_R(json_dict)
 
 
@@ -387,23 +396,78 @@ def _generate_segments_and_aberrations_bed(rem_input, results):
     aberrations_file.close()
 
 
-def _generate_gene_calls_and_plots(rem_input, results):
-    """Generate amplified/deleted gene TSVs and detail plots using gene bin values.
-
-    Uses the regions file (chr,start,end,name) to extract bin values for each gene.
-    Calls gains/losses based on the selected method:
-    - "conumee": uses beta/zscore thresholds (default)
-    - "segment-wise": checks if gene overlaps a deviant segment
-    
-    Always generates plots showing all genes with colors based on call status.
+def _build_conumee_state_thresholds(results, conf=0.99, outlier_thresh=0.8, min_state_bins=5):
     """
+    K-means (k=3) on autosomal bin ratios → state-specific analytical normal thresholds.
+
+    States are ordered by centroid: 1=deletion, 2=neutral, 3=gain.
+    Returns (thresholds, centroids):
+      thresholds – dict {1:(low,high), 2:(low,high), 3:(low,high)}
+      centroids  – length-3 ndarray sorted ascending
+    """
+    from scipy.cluster.vq import kmeans2
+    from scipy.stats import norm as _norm
+
+    all_r, all_w = [], []
+    for ci in range(22):
+        r = np.array(results["results_r"][ci], dtype=float)
+        w = np.array(results["results_w"][ci], dtype=float)
+        valid = np.isfinite(r) & np.isfinite(w) & (w > 0) & (np.abs(r) <= outlier_thresh)
+        all_r.extend(r[valid].tolist())
+        all_w.extend(w[valid].tolist())
+
+    r_arr = np.array(all_r, dtype=float)
+    w_arr = np.array(all_w, dtype=float)
+
+    zcrit = _norm.ppf(1 - (1 - conf) / 2)
+    centroids = np.array([-0.3, 0.0, 0.3])
+
+    global_mu = float(np.nanmean(r_arr)) if len(r_arr) else 0.0
+    global_sigma = max(float(np.nanstd(r_arr, ddof=1)) if len(r_arr) > 2 else 0.1, 0.05)
+    fallback_thr = (global_mu - zcrit * global_sigma, global_mu + zcrit * global_sigma)
+    thresholds = {1: fallback_thr, 2: fallback_thr, 3: fallback_thr}
+
+    if len(r_arr) < 15:
+        return thresholds, centroids
+
+    init_centers = np.array([
+        np.percentile(r_arr, 15),
+        np.percentile(r_arr, 50),
+        np.percentile(r_arr, 85),
+    ])
+    try:
+        raw_centroids, labels = kmeans2(r_arr, init_centers, iter=20, minit='matrix')
+    except Exception:
+        return thresholds, centroids
+
+    order = np.argsort(raw_centroids)
+    centroids = raw_centroids[order]
+    label_remap = {int(old): i for i, old in enumerate(order)}
+    labels_sorted = np.array([label_remap[int(l)] for l in labels])
+
+    for i in range(3):
+        state_id = i + 1
+        mask = labels_sorted == i
+        state_r = r_arr[mask]
+        state_w = w_arr[mask]
+        if len(state_r) < min_state_bins:
+            thresholds[state_id] = fallback_thr
+            continue
+        mu = float(np.average(state_r, weights=state_w))
+        var = float(np.average((state_r - mu) ** 2, weights=state_w))
+        sigma = max(float(np.sqrt(var)), 0.03)
+        thresholds[state_id] = (mu - zcrit * sigma, mu + zcrit * sigma)
+
+    return thresholds, centroids
+
+
+def _generate_gene_calls_and_plots(rem_input, results):
+    from scipy.stats import norm as _norm
+
     regions_path = rem_input["args"].regions
     if regions_path is None or not os.path.exists(regions_path):
         return
 
-    import math as _math
-
-    # Load regions (genes)
     regions = []
     with open(regions_path, "r") as handle:
         for line in handle:
@@ -412,252 +476,154 @@ def _generate_gene_calls_and_plots(rem_input, results):
             parts = line.strip().split("\t")
             if len(parts) < 4:
                 continue
-            chr_name = parts[0].replace("chr", "")
+            chr_raw = parts[0].replace("chr", "")
             try:
-                start = int(parts[1])
-                end = int(parts[2])
+                start, end = int(parts[1]), int(parts[2])
             except ValueError:
                 continue
-            name = parts[3]
-            regions.append((chr_name, start, end, name))
+            regions.append((chr_raw, start, end, parts[3]))
 
     if not regions:
         return
 
-    outdir = os.path.abspath(rem_input["args"].outid + ".plots")
+    outdir  = os.path.abspath(rem_input["args"].outid + ".plots")
     os.makedirs(outdir, exist_ok=True)
+    outid   = rem_input["args"].outid
+    binsize = rem_input["binsize"]
+    bins_per_chr = rem_input.get("bins_per_chr", [])
 
-    # Helper function to get pval from zscore
-    def _get_pval_from_z(z):
-        try:
-            zf = float(z)
-        except Exception:
-            return _math.nan
-        if not _math.isfinite(zf):
-            return _math.nan
-        return math.erfc(abs(zf) / math.sqrt(2.0))
+    conf        = 0.99
+    noise_floor = 0.05
+    zcrit       = _norm.ppf(1 - (1 - conf) / 2)
 
-    # Extract gene bin values and determine calls
+    def _chr_to_idx(c):
+        if c in ("X", "chrX"): return 22
+        if c in ("Y", "chrY"): return 23
+        try: return int(re.sub("chr", "", c)) - 1
+        except (ValueError, TypeError): return -1
+
+    # Extract per-gene bin metrics
     all_genes = []
-    for chr_name, start, end, name in regions:
-        # Determine chr index
-        chr_idx = None
-        if chr_name in ["X", "chrX"]:
-            chr_idx = 21
-        elif chr_name in ["Y", "chrY"]:
-            chr_idx = 22
-        else:
-            try:
-                chr_idx = int(re.sub("chr", "", chr_name)) - 1
-            except Exception:
-                continue
+    for chr_raw, start, end, name in regions:
+        chr_idx   = _chr_to_idx(chr_raw)
         if chr_idx < 0 or chr_idx >= len(results["results_r"]):
             continue
-
-        binsize = rem_input["binsize"]
-        start_bin = max(0, start // binsize)
-        end_bin = max(0, (end - 1) // binsize)
-        if end_bin >= rem_input.get("bins_per_chr", [])[chr_idx]:
-            end_bin = rem_input.get("bins_per_chr", [])[chr_idx] - 1
-        if start_bin > end_bin:
+        s_bin = max(0, start // binsize)
+        e_bin = max(0, (end - 1) // binsize)
+        if chr_idx < len(bins_per_chr):
+            e_bin = min(e_bin, bins_per_chr[chr_idx] - 1)
+        if s_bin > e_bin:
             continue
-
-        # Extract bin values for this gene
-        region_ratios = np.array(results["results_r"][chr_idx][start_bin : end_bin + 1], dtype=float)
-        region_weights = np.array(results["results_w"][chr_idx][start_bin : end_bin + 1], dtype=float)
-        region_z = np.array(results.get("results_z", [])[chr_idx][start_bin : end_bin + 1], dtype=float)
-
-        # Compute weighted mean values for the gene
-        try:
-            ratio_mean = float(np.ma.average(region_ratios, weights=region_weights))
-        except Exception:
-            ratio_mean = float("nan")
-        try:
-            z_mean = float(np.ma.average(region_z, weights=region_weights))
-        except Exception:
-            z_mean = float("nan")
-
-        pval = _get_pval_from_z(z_mean)
-
+        r_b = np.array(results["results_r"][chr_idx][s_bin:e_bin + 1], dtype=float)
+        w_b = np.array(results["results_w"][chr_idx][s_bin:e_bin + 1], dtype=float)
+        z_b = np.array(results.get("results_z", [[]] * 24)[chr_idx][s_bin:e_bin + 1], dtype=float)
+        ok  = np.isfinite(r_b) & np.isfinite(w_b) & (w_b > 0)
+        if not np.any(ok):
+            continue
         all_genes.append({
-            "name": name,
-            "chr": chr_name,
-            "start": start,
-            "end": end,
-            "ratio": ratio_mean,
-            "zscore": z_mean,
-            "pval": pval,
+            "name":   name,
+            "chr":    chr_raw,
+            "start":  start,
+            "end":    end,
+            "ratio":  float(np.average(r_b[ok], weights=w_b[ok])),
+            "zscore": float(np.average(z_b[ok], weights=w_b[ok])),
         })
 
     if not all_genes:
         return
 
-    # Determine calling method
-    gene_call_method = getattr(rem_input["args"], "gene_call_method", None) or "conumee"
+    # Broad thresholds from k-means; neutral_sigma doubles as focal noise scale
+    thresholds, _ = _build_conumee_state_thresholds(results, conf=conf)
+    neutral_low, neutral_high = thresholds[2]
+    neutral_mu    = (neutral_high + neutral_low) / 2
+    neutral_sigma = max((neutral_high - neutral_low) / (2 * zcrit), noise_floor)
 
-    # Build segment-based index for segment-wise method
-    deviant_segments_by_chr = {}
-    if gene_call_method == "segment-wise":
-        gain_thr = rem_input["args"].gene_call_thr_gain
-        loss_thr = rem_input["args"].gene_call_thr_loss
-        if gain_thr is not None or loss_thr is not None:
-            for segment in results["results_c"]:
-                chr_idx = int(segment[0])
-                chr_name = str(chr_idx + 1)
-                if chr_name == "23":
-                    chr_name = "X"
-                if chr_name == "24":
-                    chr_name = "Y"
-                ratio = float(segment[4])
-                
-                is_deviant = False
-                dev_type = None
-                if gain_thr is not None and ratio >= gain_thr:
-                    is_deviant = True
-                    dev_type = "gain"
-                elif loss_thr is not None and ratio <= loss_thr:
-                    is_deviant = True
-                    dev_type = "loss"
-                
-                if is_deviant:
-                    start_pos = int(segment[1] * rem_input["binsize"] + 1)
-                    end_pos = int(segment[2] * rem_input["binsize"])
-                    if chr_name not in deviant_segments_by_chr:
-                        deviant_segments_by_chr[chr_name] = []
-                    deviant_segments_by_chr[chr_name].append((start_pos, end_pos, dev_type))
+    # Segment median lookup
+    seg_by_chr: Dict[str, list] = {}
+    for seg in results["results_c"]:
+        ci  = int(seg[0])
+        ck  = str(ci + 1) if ci + 1 not in (23, 24) else ("X" if ci + 1 == 23 else "Y")
+        seg_by_chr.setdefault(ck, []).append((
+            int(seg[1]) * binsize,
+            int(seg[2]) * binsize + binsize - 1,
+            float(seg[4]),
+        ))
 
-    # Apply calling logic based on method
-    amp_rows = []
-    del_rows = []
+    broad_amp, broad_del, focal_amp, focal_del = [], [], [], []
+    cols_broad = ["gene", "chr", "start", "end", "ratio", "zscore", "broad_call", "pval"]
+    cols_focal = ["gene", "chr", "start", "end", "ratio", "zscore",
+                  "seg_ratio", "focal_dev", "focal_z", "focal_call", "pval"]
 
     for gene in all_genes:
-        call = "neutral"
-        call_source = ""
+        ratio, zscore, ck = gene["ratio"], gene["zscore"], gene["chr"]
 
-        if gene_call_method == "segment-wise":
-            # Check if gene overlaps a deviant segment
-            chr_name = gene["chr"]
-            if chr_name in deviant_segments_by_chr:
-                for seg_start, seg_end, dev_type in deviant_segments_by_chr[chr_name]:
-                    if gene["end"] >= seg_start and gene["start"] <= seg_end:
-                        if dev_type == "gain":
-                            call = "gain"
-                            call_source = "segment-wise"
-                            break
-                        elif dev_type == "loss":
-                            call = "deletion"
-                            call_source = "segment-wise"
-                            break
+        broad_z    = (ratio - neutral_mu) / neutral_sigma
+        broad_pval = float(2 * (1 - _norm.cdf(abs(broad_z))))
+        base = {"gene": gene["name"], "chr": ck,
+                "start": gene["start"], "end": gene["end"],
+                "ratio": ratio, "zscore": zscore, "pval": broad_pval}
+        if ratio > neutral_high:
+            gene["call"] = "gain"
+            broad_amp.append({**base, "broad_call": "gain"})
+        elif ratio < neutral_low:
+            gene["call"] = "deletion"
+            broad_del.append({**base, "broad_call": "deletion"})
         else:
-            # Conumee method: use beta/zscore thresholds
-            chr_name = gene["chr"].replace("chr", "")
-            ploidy = 2
-            if chr_name in ["X", "Y"] and rem_input["ref_gender"] == "M":
-                ploidy = 1
+            gene["call"] = "neutral"
 
-            if rem_input["args"].beta is not None:
-                loss_cutoff, gain_cutoff = __get_aberration_cutoff(rem_input["args"].beta, ploidy)
-                if gene["ratio"] is not None and not np.isnan(gene["ratio"]):
-                    if gene["ratio"] > gain_cutoff:
-                        call = "gain"
-                        call_source = "beta_ratio"
-                    elif gene["ratio"] < loss_cutoff:
-                        call = "deletion"
-                        call_source = "beta_ratio"
-            else:
-                # Use zscore threshold primarily
-                try:
-                    if not np.isnan(gene["zscore"]) and gene["zscore"] > rem_input["args"].zscore:
-                        call = "gain"
-                        call_source = "zscore"
-                    elif not np.isnan(gene["zscore"]) and gene["zscore"] < -rem_input["args"].zscore:
-                        call = "deletion"
-                        call_source = "zscore"
-                    else:
-                        # fallback to ratio magnitude
-                        if not np.isnan(gene["ratio"]) and abs(gene["ratio"]) >= 0.3:
-                            call = "gain" if gene["ratio"] > 0 else "deletion"
-                            call_source = "ratio_fallback"
-                except Exception:
-                    pass
+        seg_ratio = next((m for s, e, m in seg_by_chr.get(ck, [])
+                          if gene["end"] >= s and gene["start"] <= e), None)
+        if seg_ratio is None:
+            continue
+        focal_dev  = ratio - seg_ratio
+        focal_z    = focal_dev / neutral_sigma
+        focal_pval = float(2 * (1 - _norm.cdf(abs(focal_z))))
+        if abs(focal_z) > zcrit:
+            fcall = "gain" if focal_z > 0 else "deletion"
+            row = {**base, "seg_ratio": seg_ratio, "focal_dev": focal_dev,
+                   "focal_z": focal_z, "focal_call": fcall, "pval": focal_pval}
+            (focal_amp if fcall == "gain" else focal_del).append(row)
 
-        # Update gene with call status
-        gene["call"] = call
-        gene["call_source"] = call_source
+    for path, rows, cols in [
+        (f"{outid}_broad_amplified_genes.tsv", broad_amp, cols_broad),
+        (f"{outid}_broad_deleted_genes.tsv",   broad_del, cols_broad),
+        (f"{outid}_focal_amplified_genes.tsv", focal_amp, cols_focal),
+        (f"{outid}_focal_deleted_genes.tsv",   focal_del, cols_focal),
+    ]:
+        with open(path, "w") as fh:
+            fh.write("\t".join(cols) + "\n")
+            for row in rows:
+                fh.write("\t".join(str(row[c]) for c in cols) + "\n")
 
-        outrow = {
-            "name": gene["name"],
-            "chr": gene["chr"],
-            "start": gene["start"],
-            "end": gene["end"],
-            "ratio": gene["ratio"],
-            "zscore": gene["zscore"],
-            "call": call,
-            "call_source": call_source,
-            "pval": gene["pval"],
-        }
-
-        if call == "gain":
-            amp_rows.append(outrow)
-        elif call == "deletion":
-            del_rows.append(outrow)
-
-    # Write TSVs
-    def _write_tsv(path, rows_list):
-        with open(path, "w") as fo:
-            fo.write("name\tchr\tstart\tend\tratio\tzscore\tcall\tcall_source\tpval\n")
-            for r in rows_list:
-                pval_str = "{:.6e}".format(r["pval"]) if _math.isfinite(r["pval"]) else "nan"
-                row_copy = r.copy()
-                del row_copy["pval"]  # remove pval from dict to avoid conflict with explicit pval parameter
-                fo.write("{name}\t{chr}\t{start}\t{end}\t{ratio:.4f}\t{zscore:.4f}\t{call}\t{call_source}\t{pval}\n".format(
-                    pval=pval_str, **row_copy
-                ))
-
-    if amp_rows:
-        amp_path = "{}_amplified_genes.tsv".format(rem_input["args"].outid)
-        _write_tsv(amp_path, amp_rows)
-    if del_rows:
-        del_path = "{}_deleted_genes.tsv".format(rem_input["args"].outid)
-        _write_tsv(del_path, del_rows)
-
-    # Create plots: always generate regardless of method
     try:
-        genes_df = all_genes
-        # detail genes barplot
-        fig, ax = plt.subplots(figsize=(max(8, len(genes_df) * 0.35), 6))
-        names = [g["name"] for g in genes_df]
-        ratios = [0.0 if (g["ratio"] is None or np.isnan(g["ratio"])) else g["ratio"] for g in genes_df]
-        
-        # Build call->color mapping for each gene
-        call_colors = {"gain": "#27ae60", "deletion": "#c0392b", "neutral": "#bdc3c7"}
-        colors = [call_colors.get(g["call"], "#bdc3c7") for g in genes_df]
-        
-        x = range(len(names))
-        ax.bar(x, ratios, color=colors)
-        ax.axhline(0, color="black", linewidth=0.8)
-        ax.set_xticks(x)
-        ax.set_xticklabels(names, rotation=45, ha='right', fontsize=8)
-        ax.set_ylabel("log2 ratio")
-        ax.set_ylim(-1.25, 1.25)
-        ax.set_title("Detail Genes: {}".format(os.path.basename(rem_input["args"].outid)))
-        plt.tight_layout()
-        fig_path = os.path.join(outdir, "ratio_genes_scatter.png")
-        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        focal_gene_names = {row["gene"] for row in focal_amp + focal_del}
+        def _gene_color(g):
+            if g["name"] in focal_gene_names:
+                return "#c0392b"   # focal altered — red
+            if g["call"] in ("gain", "deletion"):
+                return "#8e44ad"   # broad-only altered — purple
+            return "lightgrey"
 
-        # gene aberrations scatter (ratio vs index with color)
-        fig, ax = plt.subplots(figsize=(max(8, len(genes_df) * 0.35), 4))
-        ax.scatter(x, ratios, c=colors, s=50, edgecolor='black')
-        ax.axhline(0, color='grey', linewidth=0.8)
+        import matplotlib.patches as _mpatches
+        x = list(range(len(all_genes)))
+        fig, ax = plt.subplots(figsize=(max(8, len(all_genes) * 0.35), 4))
+        ax.scatter(x, [g["ratio"] for g in all_genes],
+                   c=[_gene_color(g) for g in all_genes],
+                   s=50, edgecolor="black", linewidths=0.5)
+        ax.axhline(0, color="grey", linewidth=0.8)
         ax.set_xticks(x)
-        ax.set_xticklabels(names, rotation=45, ha='right', fontsize=8)
+        ax.set_xticklabels([g["name"] for g in all_genes], rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("log2 ratio")
         ax.set_ylim(-1.25, 1.25)
-        ax.set_title("Gene Aberrations: {}".format(os.path.basename(rem_input["args"].outid)))
+        ax.set_title("Gene Aberrations: {}".format(os.path.basename(outid)))
+        legend_handles = [
+            _mpatches.Patch(color="#c0392b", label="Focal altered"),
+            _mpatches.Patch(color="#8e44ad", label="Broad altered (not focal)"),
+            _mpatches.Patch(color="lightgrey", label="Neutral"),
+        ]
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=7.5, framealpha=0.85)
         plt.tight_layout()
-        fig_path2 = os.path.join(outdir, "ratio_genes_bar.png")
-        fig.savefig(fig_path2, dpi=150, bbox_inches="tight")
+        fig.savefig(os.path.join(outdir, "ratio_genes_bar.png"), dpi=150, bbox_inches="tight")
         plt.close(fig)
     except Exception:
         pass

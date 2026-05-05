@@ -313,29 +313,42 @@ if (!is.finite(min_dist) || !is.finite(max_dist) || min_dist == max_dist) {
 
 
 # create labels dataframe
-gene_labels <- data.frame(start_bin=integer(), end_bin=integer(), label=character(), label_position=double(), label_adj=integer(), dot_x=double(), dot_y=double())
+gene_labels <- data.frame(start_bin=integer(), end_bin=integer(), label=character(), label_position=double(), label_adj=integer(), dot_x=double(), dot_y=double(), label_col=character())
 
-# Load amplified and deleted genes from TSV files if they exist
-amplified_genes <- character(0)
-deleted_genes <- character(0)
+# Load gene annotation files.
+# Priority: focal/broad override files (written after gene calling in epic_cfrrbs.py) >
+#           original amplified/deleted files (written during predict).
+# focal genes -> red (#c0392b), broad-only genes -> purple (#8e44ad), neutral -> black
 outid_base <- gsub("\\.plots$", "", out.dir)
-amp_file <- paste0(outid_base, "_amplified_genes.tsv")
-del_file <- paste0(outid_base, "_deleted_genes.tsv")
-if (file.exists(amp_file)) {
+
+load_gene_names <- function(filepath, name_col = c("gene", "name")) {
+  genes <- character(0)
+  if (!file.exists(filepath)) return(genes)
   tryCatch({
-    amp_df <- read.delim(amp_file, header=TRUE, sep="\t", stringsAsFactors=FALSE)
-    if (nrow(amp_df) > 0 && "name" %in% colnames(amp_df)) {
-      amplified_genes <- unique(trimws(amp_df$name))
-    }
+    df <- read.delim(filepath, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+    col <- intersect(name_col, colnames(df))[1]
+    if (!is.na(col) && nrow(df) > 0) genes <- unique(trimws(df[[col]]))
   }, error = function(e) {})
+  genes
 }
-if (file.exists(del_file)) {
-  tryCatch({
-    del_df <- read.delim(del_file, header=TRUE, sep="\t", stringsAsFactors=FALSE)
-    if (nrow(del_df) > 0 && "name" %in% colnames(del_df)) {
-      deleted_genes <- unique(trimws(del_df$name))
-    }
-  }, error = function(e) {})
+
+focal_amp_file  <- paste0(outid_base, "_focal_amplified_genes.tsv")
+focal_del_file  <- paste0(outid_base, "_focal_deleted_genes.tsv")
+broad_amp_file  <- paste0(outid_base, "_broad_amplified_genes.tsv")
+broad_del_file  <- paste0(outid_base, "_broad_deleted_genes.tsv")
+
+use_focal_broad <- any(file.exists(c(focal_amp_file, focal_del_file, broad_amp_file, broad_del_file)))
+
+if (use_focal_broad) {
+  focal_genes <- unique(c(load_gene_names(focal_amp_file), load_gene_names(focal_del_file)))
+  broad_genes <- unique(c(load_gene_names(broad_amp_file), load_gene_names(broad_del_file)))
+  amplified_genes <- character(0)
+  deleted_genes   <- character(0)
+} else {
+  focal_genes <- character(0)
+  broad_genes <- character(0)
+  amplified_genes <- load_gene_names(paste0(outid_base, "_amplified_genes.tsv"), c("name", "gene"))
+  deleted_genes   <- load_gene_names(paste0(outid_base, "_deleted_genes.tsv"),   c("name", "gene"))
 }
 
 append_labels_from_regions <- function(regions_df) {
@@ -402,20 +415,30 @@ append_labels_from_regions <- function(regions_df) {
       label_adj <- 1
     }
 
+    # focal=red, broad=purple, legacy-called=red, neutral=black
+    label_col <- if (use_focal_broad) {
+      if (label_value %in% focal_genes) "#c0392b"
+      else if (label_value %in% broad_genes) "#8e44ad"
+      else "black"
+    } else {
+      if (label_value %in% amplified_genes || label_value %in% deleted_genes) "#c0392b" else "black"
+    }
+
     gene_labels <<- rbind(gene_labels,
                 data.frame(start_bin=start_bin, end_bin=end_bin,
                      label=label_value,
                      label_position=label_position,
                      label_adj=label_adj,
                      dot_x=dot_x,
-                     dot_y=dot_y))
+                     dot_y=dot_y,
+                     label_col=label_col))
   }
 }
 
 append_labels_from_regions(regions)
 
 colnames(gene_labels) <- c("start_bin", "end_bin", "label",
-                           "label_position", "label_adj", "dot_x", "dot_y")
+                           "label_position", "label_adj", "dot_x", "dot_y", "label_col")
 
 # Draw gene-call threshold lines BEFORE points if provided and using segment-wise method (behind points)
 if (gene_call_method == "segment-wise") {
@@ -441,49 +464,31 @@ gain_cutoff <- cutoffs[2]
 
 # Plot gene labels
 for (i in seq_len(nrow(gene_labels))){
-  start_bin = gene_labels$start_bin[i]
-  end_bin = gene_labels$end_bin[i]
-  label = gene_labels$label[i]
+  start_bin    = gene_labels$start_bin[i]
+  end_bin      = gene_labels$end_bin[i]
+  label        = gene_labels$label[i]
   label_position = gene_labels$label_position[i]
-  label_adj = gene_labels$label_adj[i]
-  
-  dot_x <- gene_labels$dot_x[i]
-  dot_y <- gene_labels$dot_y[i]
-  
-  # Check if dot is beyond chr.wide scale limits
+  label_adj    = gene_labels$label_adj[i]
+  dot_x        <- gene_labels$dot_x[i]
+  dot_y        <- gene_labels$dot_y[i]
+  label_col    <- gene_labels$label_col[i]
+
   if (dot_y < chr.wide.lower.limit || dot_y > chr.wide.upper.limit) {
-    # Out of bounds: clamp dot to edge and place label outside
-    clamped_dot_y <- pmax(pmin(dot_y, chr.wide.upper.limit + 0.05), chr.wide.lower.limit - 0.05)
-    
-    # Overlay clamped point at edge
-    points(dot_x, clamped_dot_y, col="black", pch=16, cex=1.1, lwd=1)
-    
-    # Place label offset to the right of the dot and vertically offset outside the edge
-    y_offset <- 0.075 * (chr.wide.upper.limit - chr.wide.lower.limit)
-    x_offset <- 0.15
-    ratio_text <- sprintf("%.2f", dot_y)
-    label_with_ratio <- paste0(label, " (", ratio_text, ")")
-    
-    if (dot_y < chr.wide.lower.limit) {
-      # Bottom edge (value is below): label below the edge with down arrow
-      label_y <- chr.wide.lower.limit - y_offset
-      label_text <- paste0("↓ ", label_with_ratio)
+    # Out of bounds: arrow + label + value anchored at the very edge, no dot
+    ratio_text  <- sprintf("%.2f", dot_y)
+    if (dot_y > chr.wide.upper.limit) {
+      label_text  <- paste0("↑ ", label, " (", ratio_text, ")")
+      label_y     <- chr.wide.upper.limit
+      label_adj_v <- 1
     } else {
-      # Top edge (value is above): label above the edge with up arrow
-      label_y <- chr.wide.upper.limit + y_offset
-      label_text <- paste0("↑ ", label_with_ratio)
+      label_text  <- paste0("↓ ", label, " (", ratio_text, ")")
+      label_y     <- chr.wide.lower.limit
+      label_adj_v <- 0
     }
-    
-    par(xpd=NA)
-    text(dot_x + x_offset, label_y,
-      labels=label_text, col="black", cex=0.85, srt=0, adj=0, font=2)
-    par(xpd=F)
+    text(dot_x, label_y, labels=label_text, col=label_col, cex=0.85, srt=90, adj=label_adj_v, font=2)
   } else {
-    # Within bounds: use original logic
     points(dot_x, dot_y, col="black", pch=16, cex=1.1, lwd=1)
-    
-    text(dot_x, label_position,
-      labels=label, col="black", cex=0.85, srt=90, adj=label_adj, font=2)
+    text(dot_x, label_position, labels=label, col=label_col, cex=0.85, srt=90, adj=label_adj, font=2)
   }
 }
 
@@ -657,53 +662,35 @@ if (!genome_only){
     rect(chr.ends[c+1], lower.limit - 10, chr.ends[length(chr.ends)], upper.limit + 10, col="white", border=NA)
 
     for (i in seq_len(nrow(gene_labels))){
-      start_bin = gene_labels$start_bin[i]
-      end_bin = gene_labels$end_bin[i]
-      label = gene_labels$label[i]
+      start_bin    = gene_labels$start_bin[i]
+      end_bin      = gene_labels$end_bin[i]
+      label        = gene_labels$label[i]
       label_position = gene_labels$label_position[i]
-      label_adj = gene_labels$label_adj[i]
-      
-      dot_x <- start_bin + (end_bin - start_bin) / 2
-      dot_y <- gene_labels$dot_y[i]
-      
-      # Overlay the points for the gene region
+      label_adj    = gene_labels$label_adj[i]
+      dot_x        <- start_bin + (end_bin - start_bin) / 2
+      dot_y        <- gene_labels$dot_y[i]
+      label_col    <- gene_labels$label_col[i]
+
+      # Always highlight all bins in the gene region
       points(seq(start_bin, end_bin), ratio[start_bin:end_bin], col="black", pch=16, cex=1.1, lwd=1)
-      
-      # Check if dot is beyond chromosome scale limits
+
       if (dot_y < lower.limit || dot_y > upper.limit) {
-        # Out of bounds: clamp dot to edge and place label outside
-        clamped_dot_y <- pmax(pmin(dot_y, upper.limit), lower.limit)
-        
-        # Overlay clamped point at edge
-        points(dot_x, clamped_dot_y, col="black", pch=16, cex=1.2, lwd=1.5)
-        
-        # Place label offset outside the edge
-        label_offset <- 0.02 * (upper.limit - lower.limit)
-        if (dot_y < lower.limit) {
-          # Bottom edge: label below
-          label_y <- lower.limit - label_offset
-          label_adj_out <- 1  # Below
+        # Out of bounds: arrow + label + value anchored at the very edge, no dot
+        ratio_text  <- sprintf("%.2f", dot_y)
+        if (dot_y > upper.limit) {
+          label_text  <- paste0("↑ ", label, " (", ratio_text, ")")
+          label_y     <- upper.limit
+          label_adj_v <- 1
         } else {
-          # Top edge: label above
-          label_y <- upper.limit + label_offset
-          label_adj_out <- 0  # Above
+          label_text  <- paste0("↓ ", label, " (", ratio_text, ")")
+          label_y     <- lower.limit
+          label_adj_v <- 0
         }
-        
-        ratio_text <- sprintf("%.2f", dot_y)
-        label_with_ratio <- paste0(label, " (", ratio_text, ")")
-        
-        par(xpd=NA)
-        text(dot_x, label_y,
-          labels=label_with_ratio, col="black", cex=1.05, srt=90, adj=label_adj_out, font=2)
-        par(xpd=F)
+        text(dot_x, label_y, labels=label_text, col=label_col, cex=1.05, srt=90, adj=label_adj_v, font=2)
       } else {
-        # Within bounds: use original label logic
-        par(xpd=NA)
-        text(dot_x, label_position,
-            labels=label, col="black", cex=1.05, srt=90, adj=label_adj)
-        par(xpd=F)
+        text(dot_x, label_position, labels=label, col=label_col, cex=1.05, srt=90, adj=label_adj)
       }
-  } 
+    }
 
     par(xpd=NA)
     text(x.labels.at, par("usr")[3], labels=x.labels, srt=45, pos=1)

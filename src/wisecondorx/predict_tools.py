@@ -15,13 +15,74 @@ model trained during newref phase.
 
 
 def predict_gender(sample, trained_cutoff):
-    Y_fraction = float(np.sum(sample["24"])) / float(
-        np.sum([np.sum(sample[x]) for x in sample.keys()])
-    )
+    # Calculate autosomal mean for X/Y/autosome ratios
+    autos_means = []
+    for i in range(1, 23):
+        k = str(i)
+        if k in sample:
+            arr = np.asarray(sample[k], dtype=float)
+            if arr.size:
+                autos_means.append(np.nanmean(arr))
+    
+    autos_mean = float(np.nanmean(np.array(autos_means))) if autos_means else 1.0
+    
+    # Calculate X and Y means
+    x_key = "23"
+    y_key = "24"
+    x_mean = float(np.nanmean(np.asarray(sample.get(x_key, [1]), dtype=float))) if x_key in sample else 1.0
+    y_mean = float(np.nanmean(np.asarray(sample.get(y_key, [1]), dtype=float))) if y_key in sample else 1.0
+    
+    # Calculate ratios relative to autosomes
+    x_ratio = x_mean / autos_mean if autos_mean > 0 else 1.0
+    y_ratio = y_mean / autos_mean if autos_mean > 0 else 1.0
+    
+    # Calculate Y fraction
+    total_reads = float(np.sum([np.sum(sample[x]) for x in sample.keys()]))
+    y_sum = 0.0
+    if y_key in sample:
+        y_sum = float(np.sum(sample[y_key]))
+    elif "Y" in sample:
+        y_sum = float(np.sum(sample["Y"]))
+    
+    Y_fraction = y_sum / total_reads if total_reads > 0 else 0.0
+
+    # Borderline guard: if Y is only slightly above cutoff but X vastly exceeds Y,
+    # this is more consistent with a female sample carrying low-level male contamination.
+    # Keep this conservative to avoid flipping true males.
+    if x_mean > 0 and y_mean > 0:
+        x_y_ratio = x_mean / y_mean
+        if (
+            Y_fraction > trained_cutoff
+            and Y_fraction <= (trained_cutoff * 1.5)
+            and x_y_ratio >= 4.0
+        ):
+            return "F"
+    
+    # CONTAMINATION DETECTION (high confidence only):
+    # If X is VERY amplified (>2.0x, not just >1.5x) and Y fraction is elevated,
+    # it's likely female with male contamination, not true male/X-aneuploidy
+    # This threshold (2.0x) is high enough to avoid false positives in X aneuploidy
+    if x_ratio > 2.0 and Y_fraction > trained_cutoff:
+        if x_mean > 0 and y_mean > 0:
+            x_y_ratio = x_mean / y_mean
+            # Very high X/Y ratio indicates female with contamination, not true male
+            if x_y_ratio > 3.0:  # Conservative threshold to avoid misclassifying X aneuploidy
+                return "F"
+    
+    # Standard call: if Y fraction exceeds trained cutoff, likely male
+    # (includes true males and male-contaminated females with X < 2.0x)
     if Y_fraction > trained_cutoff:
         return "M"
-    else:
-        return "F"
+    
+    # Fallback: use X / autosome coverage ratio to detect males (X ~0.5 of autosomes)
+    # This catches males with poor/missing Y mapping (e.g., cross-platform issues)
+    # But be careful: only call as male if Y fraction is also low to avoid false positives
+    # in females with extreme X deletions
+    if autos_mean > 0 and x_ratio < 0.75 and Y_fraction < (trained_cutoff * 0.5):
+        # X very low AND Y also very low = likely male with poor Y coverage
+        return "M"
+    
+    return "F"
 
 
 """
@@ -144,6 +205,74 @@ def _normalize_once(test_data, test_copy, ref_file, optimal_cutoff, ct, cp, ap):
             i2 += 1
 
     return results_z, results_r, ref_sizes, results_variance
+
+
+def normalize_median(test_data, ref_file, ct, cp, ap, ref_gender="A"):
+    """
+    Median-based normalization. Normalize by dividing each bin
+    by the median of putatively 'normal' bins (non-aberrant).
+    This is a simplified, within-sample method that uses the
+    global median (after outlier removal via MAD) as reference.
+    Returns the same tuple shape as `normalize_repeat` for compatibility.
+    """
+    masked_bins_per_chr_cum = ref_file["masked_bins_per_chr_cum{}".format(ap)]
+
+    total_len = masked_bins_per_chr_cum[-1]
+    results_r = np.zeros(total_len)[ct:]
+    results_z = np.zeros(total_len)[ct:]
+    ref_sizes = np.zeros(total_len)[ct:]
+    results_variance = np.zeros(total_len)[ct:]
+
+    # Consider all positive bins for the initial median calculation
+    all_data_valid = test_data[test_data > 0]
+
+    if len(all_data_valid) == 0:
+        m_lr = 0.0
+        m_z = 0.0
+        return results_z, results_r, ref_sizes, results_variance, m_lr, m_z
+
+    data_median = np.median(all_data_valid)
+    data_mad = np.median(np.abs(all_data_valid - data_median))
+
+    if data_mad > 0:
+        threshold = 3.0
+        normal_mask = np.abs(all_data_valid - data_median) <= (threshold * data_mad)
+        normal_bins = all_data_valid[normal_mask]
+    else:
+        normal_bins = all_data_valid
+
+    if len(normal_bins) > 0:
+        global_median_ref = np.median(normal_bins)
+        global_median_stdev = np.std(normal_bins)
+    else:
+        global_median_ref = data_median
+        global_median_stdev = data_mad if data_mad > 0 else 1.0
+
+    # Vectorized normalization (use per-call median/stdev; do not apply global ploidy scaling)
+    valid_bins_mask = test_data > 0
+    if global_median_ref > 0:
+        results_r_full = np.zeros(total_len)
+        results_z_full = np.zeros(total_len)
+        results_r_full[valid_bins_mask] = test_data[valid_bins_mask] / global_median_ref
+        if global_median_stdev > 0:
+            results_z_full[valid_bins_mask] = (
+                test_data[valid_bins_mask] - global_median_ref
+            ) / global_median_stdev
+        results_r = results_r_full[ct:]
+        results_z = results_z_full[ct:]
+
+    ref_sizes = np.full(total_len, len(normal_bins))[ct:]
+    # results_variance stays zeros (no per-bin variance estimate here)
+
+    valid_mask = results_r > 0
+    if np.any(valid_mask):
+        m_lr = np.nanmedian(np.log2(results_r[valid_mask]))
+        m_z = np.nanmedian(results_z[valid_mask])
+    else:
+        m_lr = 0.0
+        m_z = 0.0
+
+    return results_z, results_r, ref_sizes, results_variance, m_lr, m_z
 
 
 """

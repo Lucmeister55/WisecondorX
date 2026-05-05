@@ -200,7 +200,7 @@ def tool_test(args):
     logging.info("Normalizing autosomes ...")
 
     results_r, results_z, results_w, ref_sizes, results_variance, m_lr, m_z = normalize(
-        args, sample, ref_file, "A"
+        args, sample, ref_file, "A", args.normalization_method
     )
 
     if not ref_file["is_nipt"]:
@@ -230,7 +230,7 @@ def tool_test(args):
     ]
 
     results_r_2, results_z_2, results_w_2, ref_sizes_2, results_variance_2, _, _ = normalize(
-        args, sample, ref_file, ref_gender
+        args, sample, ref_file, ref_gender, args.normalization_method
     )
 
     rem_input = {
@@ -612,11 +612,19 @@ def main():
     parser_test.add_argument(
         "--gene-call-method",
         type=str,
-        choices=["conumee", "segment-wise"],
+        choices=["conumee", "segment-wise", "quantile"],
         default=None,
-        help="Method for calling genes: 'conumee' uses zscore/beta thresholds and weighted regional ratios; "
-        "'segment-wise' calls based on whether segments overlap deviant regions defined by --gene-call-thr-gain/loss. "
-        "Only used when --regions file is provided. If not specified and --regions is given, conumee method is used by default.",
+        help="Method for calling genes: 'conumee' uses zscore/beta thresholds; "
+        "'segment-wise' calls genes overlapping deviant segments (uses --gene-call-thr-gain/loss); "
+        "'quantile' fits a null distribution to neutral bins and calls extreme outliers by z-score. "
+        "Only used when --regions file is provided. Defaults to conumee.",
+    )
+    parser_test.add_argument(
+        "--normalization-method",
+        type=str,
+        default="reference",
+        choices=["reference", "median"],
+        help="Normalization method: 'reference' (default, uses sample-specific reference bins) or 'median' (uses chromosome median)",
     )
     parser_test.set_defaults(func=tool_test)
 
@@ -667,29 +675,6 @@ def main():
         "--overwrite",
         action="store_true",
         help="If set, remove existing contents of the output directory before writing",
-    )
-    parser_epic.add_argument(
-        "--gene-call-method",
-        type=str,
-        choices=["conumee", "segment-wise"],
-        default="conumee",
-        help="Method for calling gene gains/deletions: 'conumee' uses ratio thresholds and states; 'segment-wise' calls based on overlapping with aberrant segments",
-    )
-    parser_epic.add_argument(
-        "--gene-call-thr-gain",
-        type=float,
-        default=None,
-        help="log2ratio threshold for calling genes as amplified/gained (segment-wise method only). "
-        "If set, segments with ratio >= this threshold are marked as deviant gains. "
-        "If not set, no segment-wise gain calling is performed.",
-    )
-    parser_epic.add_argument(
-        "--gene-call-thr-loss",
-        type=float,
-        default=None,
-        help="log2ratio threshold for calling genes as deleted/lost (segment-wise method only). "
-        "If set, segments with ratio <= this threshold are marked as deviant losses. "
-        "If not set, no segment-wise loss calling is performed.",
     )
     parser_epic.set_defaults(func=tool_epic_cfrrbs)
 

@@ -6,6 +6,7 @@ from wisecondorx.predict_tools import (
     get_optimal_cutoff,
     get_weights,
     normalize_repeat,
+    normalize_median,
     inflate_results,
 )
 
@@ -18,7 +19,7 @@ normalization strategies:
 """
 
 
-def normalize(args, sample, ref_file, ref_gender):
+def normalize(args, sample, ref_file, ref_gender, normalization_method="reference"):
     if ref_gender == "A":
         ap = ""
         cp = 0
@@ -31,10 +32,16 @@ def normalize(args, sample, ref_file, ref_gender):
     sample = coverage_normalize_and_mask(sample, ref_file, ap)
     sample = project_pc(sample, ref_file, ap)
     results_w = get_weights(ref_file, ap)[ct:]
-    optimal_cutoff = get_optimal_cutoff(ref_file, args.maskrepeats)
-    results_z, results_r, ref_sizes, results_variance, m_lr, m_z = normalize_repeat(
-        sample, ref_file, optimal_cutoff, ct, cp, ap
-    )
+
+    if normalization_method == "median":
+        results_z, results_r, ref_sizes, results_variance, m_lr, m_z = normalize_median(
+            sample, ref_file, ct, cp, ap, ref_gender
+        )
+    else:
+        optimal_cutoff = get_optimal_cutoff(ref_file, args.maskrepeats)
+        results_z, results_r, ref_sizes, results_variance, m_lr, m_z = normalize_repeat(
+            sample, ref_file, optimal_cutoff, ct, cp, ap
+        )
 
     return results_r, results_z, results_w, ref_sizes, results_variance, m_lr, m_z
 
