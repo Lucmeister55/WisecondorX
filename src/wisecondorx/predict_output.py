@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import math
 import numpy as np
 import matplotlib
@@ -532,61 +533,111 @@ def _generate_gene_calls_and_plots(rem_input, results):
     if not all_genes:
         return
 
-    # Broad thresholds from k-means; neutral_sigma doubles as focal noise scale
+    # K-means neutral-state thresholds; neutral_sigma used as focal z-score denominator
     thresholds, _ = _build_conumee_state_thresholds(results, conf=conf)
     neutral_low, neutral_high = thresholds[2]
-    neutral_mu    = (neutral_high + neutral_low) / 2
     neutral_sigma = max((neutral_high - neutral_low) / (2 * zcrit), noise_floor)
 
-    # Segment median lookup
-    seg_by_chr: Dict[str, list] = {}
-    for seg in results["results_c"]:
-        ci  = int(seg[0])
-        ck  = str(ci + 1) if ci + 1 not in (23, 24) else ("X" if ci + 1 == 23 else "Y")
-        seg_by_chr.setdefault(ck, []).append((
-            int(seg[1]) * binsize,
-            int(seg[2]) * binsize + binsize - 1,
-            float(seg[4]),
-        ))
+    # ── Tumor purity estimation (ML on copy number space) ─────────────────────
+    try:
+        from scipy.optimize import minimize as _minimize
+        seg_ratios_all = [float(seg[4]) for seg in results["results_c"]]
+        seg_zscores_all = []
+        for seg in results["results_c"]:
+            ci = int(seg[0])
+            s_b, e_b = int(seg[1]), int(seg[2])
+            r_b = np.array(results["results_r"][ci][s_b:e_b + 1], dtype=float)
+            w_b = np.array(results["results_w"][ci][s_b:e_b + 1], dtype=float)
+            z_b = np.array(results.get("results_z", [[]] * 24)[ci][s_b:e_b + 1], dtype=float)
+            ok = np.isfinite(r_b) & np.isfinite(w_b) & (w_b > 0)
+            seg_zscores_all.append(float(np.average(z_b[ok], weights=w_b[ok])) if np.any(ok) else 0.0)
 
-    broad_amp, broad_del, focal_amp, focal_del = [], [], [], []
-    cols_broad = ["gene", "chr", "start", "end", "ratio", "zscore", "broad_call", "pval"]
+        if len(seg_ratios_all) >= 3:
+            abs_z_arr = np.abs(seg_zscores_all)
+            q1, q3 = np.percentile(abs_z_arr, [25, 75])
+            purity_spread = (q3 - q1) / (2 * _norm.ppf(0.75)) if (q3 - q1) > 0 else 0.1
+            ploidy = 2.0
+            purities = np.linspace(0.1, 0.99, 30)
+            best_p, best_ll = 0.5, -np.inf
+            for pur in purities:
+                ll = 0.0
+                for r in seg_ratios_all:
+                    ll += max(-0.5 * ((r - np.log2((pur * cn + (1 - pur) * ploidy) / ploidy)) / purity_spread) ** 2
+                              for cn in [0, 1, 2, 3, 4])
+                if ll > best_ll:
+                    best_ll, best_p = ll, pur
+
+            def _neg_ll(p):
+                if p < 0.05 or p > 0.99: return 1e10
+                return -sum(max(-0.5 * ((r - np.log2((p * cn + (1 - p) * ploidy) / ploidy)) / purity_spread) ** 2
+                                for cn in [0, 1, 2, 3, 4]) for r in seg_ratios_all)
+
+            res = _minimize(_neg_ll, best_p, method="L-BFGS-B", bounds=[(0.05, 0.99)])
+            final_purity = float(res.x[0]) if res.success else best_p
+            purity_file = f"{outid}_purity_estimate.txt"
+            with open(purity_file, "w") as fh:
+                fh.write("Tumor Purity Estimate (maximum likelihood on copy number space)\n")
+                fh.write(f"Purity: {final_purity:.3f}\n")
+                fh.write(f"95% CI: ({max(0.0, final_purity - 0.1):.3f}-{min(1.0, final_purity + 0.1):.3f})\n")
+                fh.write(f"Ploidy: {ploidy:.1f}\n")
+                fh.write(f"Segments used: {len(seg_ratios_all)}\n")
+    except Exception as _e:
+        print(f"[WisecondorX] Purity estimation failed: {_e}", file=sys.stderr)
+
+    # ── Gold-standard focal calling: segment-based, |log2|>=0.2 AND |z|>=2.5, <3Mb ─
+    FOCAL_MAX_BP   = 3_000_000
+    FOCAL_LOG2_THR = 0.2
+    FOCAL_Z_THR    = 2.5
+
+    def _seg_zscore(seg_ratio):
+        return seg_ratio / neutral_sigma if neutral_sigma > 0 else 0.0
+
+    # Pre-compute set of focal-significant segments: (ck, seg_start, seg_end)
+    focal_sig_segs = set()
+    for seg in results["results_c"]:
+        ci      = int(seg[0])
+        ck      = str(ci + 1) if ci + 1 not in (23, 24) else ("X" if ci + 1 == 23 else "Y")
+        s_bp    = int(seg[1]) * binsize
+        e_bp    = int(seg[2]) * binsize + binsize - 1
+        seg_r   = float(seg[4])
+        seg_z   = _seg_zscore(seg_r)
+        seg_sz  = e_bp - s_bp + 1
+        if (abs(seg_r) >= FOCAL_LOG2_THR and abs(seg_z) >= FOCAL_Z_THR and seg_sz <= FOCAL_MAX_BP):
+            focal_sig_segs.add((ck, s_bp, e_bp, seg_r))
+
+    focal_amp, focal_del = [], []
     cols_focal = ["gene", "chr", "start", "end", "ratio", "zscore",
-                  "seg_ratio", "focal_dev", "focal_z", "focal_call", "pval"]
+                  "seg_ratio", "seg_zscore", "focal_call", "pval"]
 
     for gene in all_genes:
         ratio, zscore, ck = gene["ratio"], gene["zscore"], gene["chr"]
 
-        broad_z    = (ratio - neutral_mu) / neutral_sigma
-        broad_pval = float(2 * (1 - _norm.cdf(abs(broad_z))))
         base = {"gene": gene["name"], "chr": ck,
                 "start": gene["start"], "end": gene["end"],
-                "ratio": ratio, "zscore": zscore, "pval": broad_pval}
+                "ratio": ratio, "zscore": zscore}
+        gene["call"] = "neutral"
         if ratio > neutral_high:
             gene["call"] = "gain"
-            broad_amp.append({**base, "broad_call": "gain"})
         elif ratio < neutral_low:
             gene["call"] = "deletion"
-            broad_del.append({**base, "broad_call": "deletion"})
-        else:
-            gene["call"] = "neutral"
 
-        seg_ratio = next((m for s, e, m in seg_by_chr.get(ck, [])
-                          if gene["end"] >= s and gene["start"] <= e), None)
-        if seg_ratio is None:
+        # Focal: gene must overlap a focal-significant segment (gold-standard)
+        hit = next(
+            ((ck2, s, e, sr) for (ck2, s, e, sr) in focal_sig_segs
+             if ck2 == ck and gene["end"] >= s and gene["start"] <= e),
+            None,
+        )
+        if hit is None:
             continue
-        focal_dev  = ratio - seg_ratio
-        focal_z    = focal_dev / neutral_sigma
-        focal_pval = float(2 * (1 - _norm.cdf(abs(focal_z))))
-        if abs(focal_z) > zcrit:
-            fcall = "gain" if focal_z > 0 else "deletion"
-            row = {**base, "seg_ratio": seg_ratio, "focal_dev": focal_dev,
-                   "focal_z": focal_z, "focal_call": fcall, "pval": focal_pval}
-            (focal_amp if fcall == "gain" else focal_del).append(row)
+        _, _, _, seg_r = hit
+        seg_z   = _seg_zscore(seg_r)
+        fcall   = "gain" if seg_r > 0 else "deletion"
+        fpval   = float(2 * (1 - _norm.cdf(abs(seg_z))))
+        row = {**base, "seg_ratio": seg_r, "seg_zscore": seg_z,
+               "focal_call": fcall, "pval": fpval}
+        (focal_amp if fcall == "gain" else focal_del).append(row)
 
     for path, rows, cols in [
-        (f"{outid}_broad_amplified_genes.tsv", broad_amp, cols_broad),
-        (f"{outid}_broad_deleted_genes.tsv",   broad_del, cols_broad),
         (f"{outid}_focal_amplified_genes.tsv", focal_amp, cols_focal),
         (f"{outid}_focal_deleted_genes.tsv",   focal_del, cols_focal),
     ]:
@@ -595,13 +646,25 @@ def _generate_gene_calls_and_plots(rem_input, results):
             for row in rows:
                 fh.write("\t".join(str(row[c]) for c in cols) + "\n")
 
+    # Focal segments TSV — all segments that passed gold-standard thresholds
+    cols_seg = ["chr", "start", "end", "ratio", "call", "zscore", "size_bp"]
+    with open(f"{outid}_focal_segments.tsv", "w") as fh:
+        fh.write("\t".join(cols_seg) + "\n")
+        for ck, s_bp, e_bp, seg_r in sorted(focal_sig_segs, key=lambda x: (x[0], x[1])):
+            seg_z = _seg_zscore(seg_r)
+            fh.write("\t".join(str(v) for v in [
+                ck, s_bp, e_bp, round(seg_r, 4),
+                "gain" if seg_r > 0 else "deletion",
+                round(seg_z, 4), e_bp - s_bp + 1,
+            ]) + "\n")
+
     try:
         focal_gene_names = {row["gene"] for row in focal_amp + focal_del}
         def _gene_color(g):
             if g["name"] in focal_gene_names:
                 return "#c0392b"   # focal altered — red
             if g["call"] in ("gain", "deletion"):
-                return "#8e44ad"   # broad-only altered — purple
+                return "#8e44ad"   # broad altered — purple
             return "lightgrey"
 
         import matplotlib.patches as _mpatches

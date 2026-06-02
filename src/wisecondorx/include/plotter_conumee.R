@@ -176,11 +176,10 @@ for (chr in chrs){
   h.whis.per.chr = c(h.whis.per.chr, whis[2])
 }
 
-# Reduce vertical space (conumee-style default)
-expand.factor <- 1.0
-
-chr.wide.upper.limit <- max(0.65, max(h.whis.per.chr, na.rm=T)) * expand.factor
-chr.wide.lower.limit <- min(-0.95, min(l.whis.per.chr, na.rm=T)) * expand.factor
+# Default scale -3 to 3; extend only if a segment falls outside those bounds
+seg_ratios <- sapply(input$results_c, function(s) as.numeric(s[[5]]))
+chr.wide.lower.limit <- min(-3, if (length(seg_ratios) > 0) min(seg_ratios, na.rm=T) * 1.05 else -3)
+chr.wide.upper.limit <- max( 3, if (length(seg_ratios) > 0) max(seg_ratios, na.rm=T) * 1.05 else  3)
 
 if (ylim != 'def'){
   ylim=gsub('[', '', ylim, fixed=T) ; ylim=gsub(']', '', ylim, fixed=T)
@@ -189,10 +188,7 @@ if (ylim != 'def'){
   chr.wide.upper.limit = ylim[2]
 }
 
-# Force ylim and y.ticks for conumee-style
-y.ticks <- round(seq(-1.2, 1.2, by=0.4), 1)
-chr.wide.lower.limit <- -1.25
-chr.wide.upper.limit <- 1.25
+y.ticks <- round(seq(chr.wide.lower.limit, chr.wide.upper.limit, length.out=7), 1)
 
 # plot chromosome wide plot
 
