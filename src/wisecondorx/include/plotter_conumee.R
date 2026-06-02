@@ -411,13 +411,11 @@ append_labels_from_regions <- function(regions_df) {
       label_adj <- 1
     }
 
-    # focal=red, broad=purple, legacy-called=red, neutral=black
+    # focal=purple, neutral=black
     label_col <- if (use_focal_broad) {
-      if (label_value %in% focal_genes) "#c0392b"
-      else if (label_value %in% broad_genes) "#8e44ad"
-      else "black"
+      if (label_value %in% focal_genes) "#8e44ad" else "black"
     } else {
-      if (label_value %in% amplified_genes || label_value %in% deleted_genes) "#c0392b" else "black"
+      if (label_value %in% amplified_genes || label_value %in% deleted_genes) "#8e44ad" else "black"
     }
 
     gene_labels <<- rbind(gene_labels,

@@ -661,11 +661,7 @@ def _generate_gene_calls_and_plots(rem_input, results):
     try:
         focal_gene_names = {row["gene"] for row in focal_amp + focal_del}
         def _gene_color(g):
-            if g["name"] in focal_gene_names:
-                return "#c0392b"   # focal altered — red
-            if g["call"] in ("gain", "deletion"):
-                return "#8e44ad"   # broad altered — purple
-            return "lightgrey"
+            return "#8e44ad" if g["name"] in focal_gene_names else "lightgrey"
 
         import matplotlib.patches as _mpatches
         x = list(range(len(all_genes)))
@@ -677,11 +673,9 @@ def _generate_gene_calls_and_plots(rem_input, results):
         ax.set_xticks(x)
         ax.set_xticklabels([g["name"] for g in all_genes], rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("log2 ratio")
-        ax.set_ylim(-1.25, 1.25)
         ax.set_title("Gene Aberrations: {}".format(os.path.basename(outid)))
         legend_handles = [
-            _mpatches.Patch(color="#c0392b", label="Focal altered"),
-            _mpatches.Patch(color="#8e44ad", label="Broad altered (not focal)"),
+            _mpatches.Patch(color="#8e44ad", label="Focal altered"),
             _mpatches.Patch(color="lightgrey", label="Neutral"),
         ]
         ax.legend(handles=legend_handles, loc="upper right", fontsize=7.5, framealpha=0.85)
