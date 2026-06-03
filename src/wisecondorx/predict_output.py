@@ -592,16 +592,16 @@ def _generate_gene_calls_and_plots(rem_input, results):
     def _seg_zscore(seg_ratio):
         return seg_ratio / neutral_sigma if neutral_sigma > 0 else 0.0
 
-    # Pre-compute set of focal-significant segments: (ck, seg_start, seg_end)
+    # Pre-compute set of focal-significant segments
     focal_sig_segs = set()
     for seg in results["results_c"]:
-        ci      = int(seg[0])
-        ck      = str(ci + 1) if ci + 1 not in (23, 24) else ("X" if ci + 1 == 23 else "Y")
-        s_bp    = int(seg[1]) * binsize
-        e_bp    = int(seg[2]) * binsize + binsize - 1
-        seg_r   = float(seg[4])
-        seg_z   = _seg_zscore(seg_r)
-        seg_sz  = e_bp - s_bp + 1
+        ci     = int(seg[0])
+        ck     = str(ci + 1) if ci + 1 not in (23, 24) else ("X" if ci + 1 == 23 else "Y")
+        s_bp   = int(seg[1]) * binsize
+        e_bp   = int(seg[2]) * binsize + binsize - 1
+        seg_r  = float(seg[4])
+        seg_z  = _seg_zscore(seg_r)
+        seg_sz = e_bp - s_bp + 1
         if (abs(seg_r) >= FOCAL_LOG2_THR and abs(seg_z) >= FOCAL_Z_THR and seg_sz <= FOCAL_MAX_BP):
             focal_sig_segs.add((ck, s_bp, e_bp, seg_r))
 
@@ -621,7 +621,7 @@ def _generate_gene_calls_and_plots(rem_input, results):
         elif ratio < neutral_low:
             gene["call"] = "deletion"
 
-        # Focal: gene must overlap a focal-significant segment (gold-standard)
+        # Gene called focal only if its overlapping CBS segment passes all thresholds
         hit = next(
             ((ck2, s, e, sr) for (ck2, s, e, sr) in focal_sig_segs
              if ck2 == ck and gene["end"] >= s and gene["start"] <= e),
@@ -630,9 +630,9 @@ def _generate_gene_calls_and_plots(rem_input, results):
         if hit is None:
             continue
         _, _, _, seg_r = hit
-        seg_z   = _seg_zscore(seg_r)
-        fcall   = "gain" if seg_r > 0 else "deletion"
-        fpval   = float(2 * (1 - _norm.cdf(abs(seg_z))))
+        seg_z  = _seg_zscore(seg_r)
+        fcall  = "gain" if seg_r > 0 else "deletion"
+        fpval  = float(2 * (1 - _norm.cdf(abs(seg_z))))
         row = {**base, "seg_ratio": seg_r, "seg_zscore": seg_z,
                "focal_call": fcall, "pval": fpval}
         (focal_amp if fcall == "gain" else focal_del).append(row)
@@ -646,7 +646,7 @@ def _generate_gene_calls_and_plots(rem_input, results):
             for row in rows:
                 fh.write("\t".join(str(row[c]) for c in cols) + "\n")
 
-    # Focal segments TSV — all segments that passed gold-standard thresholds
+    # Focal segments TSV
     cols_seg = ["chr", "start", "end", "ratio", "call", "zscore", "size_bp"]
     with open(f"{outid}_focal_segments.tsv", "w") as fh:
         fh.write("\t".join(cols_seg) + "\n")

@@ -16,6 +16,34 @@ import pandas as pd
 
 from wisecondorx.overall_tools import exec_R
 
+# Files written exclusively by predict_output.py — epic_cfrrbs must never overwrite these.
+_PREDICT_OUTPUT_OWNED = {
+    "_bins.bed",
+    "_segments.bed",
+    "_aberrations.bed",
+    "_regions.bed",
+    "_statistics.txt",
+    "_plot_bins_stats.tsv",
+    "_focal_amplified_genes.tsv",
+    "_focal_deleted_genes.tsv",
+    "_focal_segments.tsv",
+    "_purity_estimate.txt",
+}
+
+
+def _safe_write(path: str, df_or_func, *args, **kwargs):
+    """Write a file only if it is not owned by predict_output.py."""
+    basename = os.path.basename(path)
+    for suffix in _PREDICT_OUTPUT_OWNED:
+        if basename.endswith(suffix):
+            raise RuntimeError(
+                f"epic_cfrrbs attempted to overwrite predict_output.py file: {path}"
+            )
+    if callable(df_or_func):
+        df_or_func(*args, **kwargs)
+    else:
+        df_or_func.to_csv(path, *args, **kwargs)
+
 
 def _detect_delimiter(line: str) -> str:
     if line.count("\t") > line.count(","):
@@ -95,11 +123,13 @@ def _run_cfrrbs_predict(
     outid: str,
     blacklist: str = None,
     regions: str = None,
+    normalization_method: str = "reference",
 ) -> None:
     """Run WisecondorX predict with conumee plotting."""
     cmd = [
         "WisecondorX", "predict", npz_path, reference, outid,
         "--bed", "--conumee",
+        "--normalization-method", normalization_method,
     ]
     if blacklist:
         cmd.extend(["--blacklist", blacklist])
@@ -1371,8 +1401,11 @@ def _stack_pair_plots(epic_png: str, cfrrbs_png: str, out_png: str, title: str) 
     stacked.save(out_png)
 
 
-def _regenerate_cfrrbs_genome_plot(cfrrbs_outid: str, cf_broad_df, cf_focal_df, wd: str) -> None:
-    """Re-run plotter_conumee.R with focal/broad gene TSVs so genome_wide.png uses focal=red, broad=purple."""
+def _regenerate_cfrrbs_genome_plot(cfrrbs_outid: str, wd: str) -> None:
+    """Re-run plotter_conumee.R so genome_wide.png picks up focal gene labels.
+    Uses the focal gene TSVs already written by predict_output.py (segment-based gold standard).
+    Does NOT overwrite those files.
+    """
     plot_input_json = os.path.join(f"{cfrrbs_outid}.plots", "plot_input.json")
     if not os.path.exists(plot_input_json):
         logging.warning(f"Plot input JSON not found: {plot_input_json}; skipping cfRRBS genome plot regeneration")
@@ -1380,21 +1413,6 @@ def _regenerate_cfrrbs_genome_plot(cfrrbs_outid: str, cf_broad_df, cf_focal_df, 
 
     import json as _json, tempfile
     from wisecondorx.overall_tools import exec_R
-
-    # Write broad gene files (include all available columns)
-    broad_cols = ["gene", "chr", "start", "end", "ratio", "zscore", "broad_call", "pval"]
-    broad_cols = [c for c in broad_cols if c in cf_broad_df.columns]
-    for call, label in [("gain", "amplified"), ("deletion", "deleted")]:
-        sub = cf_broad_df[cf_broad_df["broad_call"] == call][broad_cols].copy()
-        sub.to_csv(f"{cfrrbs_outid}_broad_{label}_genes.tsv", sep="\t", index=False)
-
-    # Write focal gene files (include all available columns)
-    focal_cols = ["gene", "chr", "start", "end", "ratio", "zscore",
-                  "seg_ratio", "focal_dev", "focal_z", "focal_call", "pval"]
-    focal_cols = [c for c in focal_cols if c in cf_focal_df.columns]
-    for call, label in [("gain", "amplified"), ("deletion", "deleted")]:
-        sub = cf_focal_df[cf_focal_df["focal_call"] == call][focal_cols].copy()
-        sub.to_csv(f"{cfrrbs_outid}_focal_{label}_genes.tsv", sep="\t", index=False)
 
     try:
         with open(plot_input_json) as f:
@@ -1405,7 +1423,7 @@ def _regenerate_cfrrbs_genome_plot(cfrrbs_outid: str, cf_broad_df, cf_focal_df, 
         plot_dict["infile"] = tmp_path
         plot_dict["R_script"] = os.path.join(wd, "include", "plotter_conumee.R")
         exec_R(plot_dict)
-        logging.info(f"Regenerated cfRRBS genome plot (focal=red, broad=purple) for {cfrrbs_outid}")
+        logging.info(f"Regenerated cfRRBS genome plot for {cfrrbs_outid}")
     except Exception as e:
         logging.warning(f"Failed to regenerate cfRRBS genome plot: {e}")
 
@@ -1936,9 +1954,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
     logging.info("Phase 3: Processing cfRRBS data sample-wise")
     
     report_rows: List[Dict] = []
-    all_broad_records: List[Dict] = []
     all_focal_records: List[Dict] = []
-    epic_broad_annotation: Dict[str, Dict] = {}  # epic_id -> {rds_path, out_dir, broad_amp, broad_del}
 
     for metadata in pair_metadata:
         epic_id = metadata["epic_id"]
@@ -1962,6 +1978,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             temp_outid,
             blacklist=getattr(args, "blacklist", None),
             regions=getattr(args, "regions", None),
+            normalization_method=getattr(args, "normalization_method", "reference"),
         )
 
         cf_bins_path = temp_outid + "_bins.bed"
@@ -2050,7 +2067,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             ]
         ).to_csv(pair_corr_path, sep="\t", index=False)
 
-        # ── Gene calls: broad (Python k-means) and focal (cfRRBS Python / EPIC R) ──
+        # ── Gene calls: focal only (cfRRBS Python / EPIC R) ─────────────────────
         detail_cf_path = temp_outid + "_regions.bed"
         cf_detail_df = pd.DataFrame()
         if os.path.exists(detail_cf_path):
@@ -2069,12 +2086,10 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 logging.warning(f"[{pair_id}] Failed to load cfRRBS detail: {e}")
                 cf_detail_df = pd.DataFrame()
 
-        cf_broad_df = _call_broad_gene_events(cf_detail_df, cf_bins, conf=0.99)
+        cf_broad_df = pd.DataFrame()  # broad calling removed
         cf_focal_df = _call_focal_gene_events(cf_detail_df, cf_segments, cf_bins, conf=0.99)
         logging.info(
-            f"[{pair_id}] cfRRBS broad: gain={sum(cf_broad_df['broad_call']=='gain')}, "
-            f"deletion={sum(cf_broad_df['broad_call']=='deletion')}; "
-            f"focal: gain={sum(cf_focal_df['focal_call']=='gain')}, "
+            f"[{pair_id}] cfRRBS focal: gain={sum(cf_focal_df['focal_call']=='gain')}, "
             f"deletion={sum(cf_focal_df['focal_call']=='deletion')}"
         )
 
@@ -2112,12 +2127,6 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             except Exception as e:
                 logging.warning(f"[{pair_id}] Failed to load EPIC detail: {e}")
                 epic_detail_df = pd.DataFrame()
-
-        epic_broad_df = _call_broad_gene_events(epic_detail_df, epic_bins, conf=0.99)
-        logging.info(
-            f"[{pair_id}] EPIC broad: gain={sum(epic_broad_df['broad_call']=='gain')}, "
-            f"deletion={sum(epic_broad_df['broad_call']=='deletion')}"
-        )
 
         # EPIC focal calls from R (conumee2 CNV.focal output)
         epic_focal_gains: Set[str] = set()
@@ -2160,30 +2169,6 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 return "both_gain" if e == "gain" else "both_del"
             return "discordant_epic_gain" if e == "gain" else "discordant_epic_del"
 
-        # Per-pair broad concordance
-        cf_broad_by_gene = {str(r["gene"]).lower(): r.to_dict() for _, r in cf_broad_df.iterrows()}
-        epic_broad_by_gene = {str(r["gene"]).lower(): r.to_dict() for _, r in epic_broad_df.iterrows()}
-        broad_rows = []
-        for g in set(cf_broad_by_gene) | set(epic_broad_by_gene):
-            cf_r = cf_broad_by_gene.get(g, {})
-            ep_r = epic_broad_by_gene.get(g, {})
-            cf_call = cf_r.get("broad_call", "neutral") if cf_r else "neutral"
-            ep_call = ep_r.get("broad_call", "neutral") if ep_r else "neutral"
-            broad_rows.append({
-                "gene": cf_r.get("gene", ep_r.get("gene", g)) if cf_r else ep_r.get("gene", g),
-                "chr": (cf_r or ep_r).get("chr"),
-                "start": cf_r.get("start") if cf_r else None,
-                "end": cf_r.get("end") if cf_r else None,
-                "cfrrbs_ratio": cf_r.get("ratio", float("nan")) if cf_r else float("nan"),
-                "epic_ratio": ep_r.get("ratio", float("nan")) if ep_r else float("nan"),
-                "cfrrbs_broad": cf_call,
-                "epic_broad": ep_call,
-                "concordant": _concordance(ep_call, cf_call),
-            })
-        broad_concordance_df = pd.DataFrame(broad_rows)
-        broad_concordance_df.to_csv(
-            os.path.join(sample_pair_dir, "gene_calls_broad.tsv"), sep="\t", index=False)
-
         # Per-pair focal concordance
         epic_focal_gains_lower = {g.lower() for g in epic_focal_gains}
         epic_focal_dels_lower = {g.lower() for g in epic_focal_dels}
@@ -2213,12 +2198,6 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             os.path.join(sample_pair_dir, "gene_calls_focal.tsv"), sep="\t", index=False)
 
         # Accumulate for summary heatmaps
-        for _, row in broad_concordance_df.iterrows():
-            all_broad_records.append({
-                "gene": row["gene"], "sample_id": pair_id,
-                "epic_call": row["epic_broad"], "cfrrbs_call": row["cfrrbs_broad"],
-                "concordance": row["concordant"],
-            })
         for _, row in focal_concordance_df.iterrows():
             all_focal_records.append({
                 "gene": row["gene"], "sample_id": pair_id,
@@ -2241,20 +2220,8 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             "segments_n": corr_segments["n_segments"],
         })
 
-        # Regenerate cfRRBS genome_wide.png: focal=red, broad=purple
-        _regenerate_cfrrbs_genome_plot(temp_outid, cf_broad_df, cf_focal_df, wd)
-
-        # Collect EPIC broad calls for genomeplot annotation (one entry per EPIC sample)
-        if epic_id not in epic_broad_annotation:
-            epic_broad_annotation[epic_id] = {
-                "rds_path": rds_path,
-                "out_dir": epic_dir,
-                "epic_id": epic_id,
-                "broad_amp_genes": epic_broad_df[epic_broad_df["broad_call"] == "gain"]["gene"].tolist()
-                    if not epic_broad_df.empty else [],
-                "broad_del_genes": epic_broad_df[epic_broad_df["broad_call"] == "deletion"]["gene"].tolist()
-                    if not epic_broad_df.empty else [],
-            }
+        # Regenerate cfRRBS genome_wide.png so focal gene labels are coloured
+        _regenerate_cfrrbs_genome_plot(temp_outid, wd)
 
         # Generate stacked pair plots (after EPIC genomeplot is created in phase 2)
         cfrrbs_subdirs = [f for f in os.listdir(cfrrbs_dir) if f.endswith(".plots")]
@@ -2290,15 +2257,6 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         except Exception as e:
             logging.warning(f"Failed to create correlation summary: {e}")
 
-    if all_broad_records:
-        try:
-            _plot_concordance_heatmap(all_broad_records, "broad", concordance_dir)
-            pd.DataFrame(all_broad_records).to_csv(
-                os.path.join(concordance_dir, "concordance_broad.tsv"), sep="\t", index=False)
-            logging.info("Broad concordance heatmap and TSV written")
-        except Exception as e:
-            logging.warning(f"Failed to create broad concordance summary: {e}")
-
     if all_focal_records:
         try:
             _plot_concordance_heatmap(all_focal_records, "focal", concordance_dir)
@@ -2318,13 +2276,6 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
     try:
         gene_stats_list = []
 
-        if all_broad_records:
-            broad_stats = _aggregate_gene_concordance_stats(all_broad_records, "broad", expected_alterations)
-            if not broad_stats.empty:
-                gene_stats_list.append(broad_stats)
-                _plot_gene_concordance_table(broad_stats, "broad", concordance_dir)
-                logging.info(f"Broad gene concordance: {len(broad_stats)} genes analyzed")
-
         if all_focal_records:
             focal_stats = _aggregate_gene_concordance_stats(all_focal_records, "focal", expected_alterations)
             if not focal_stats.empty:
@@ -2337,12 +2288,6 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             logging.info("Gene-level concordance summary CSV created")
     except Exception as e:
         logging.warning(f"Failed to create gene-level concordance summaries: {e}")
-
-    # Annotate EPIC genomeplots with broad gene calls in purple, then re-stack
-    try:
-        _annotate_epic_genome_plots(list(epic_broad_annotation.values()), wd)
-    except Exception as e:
-        logging.warning(f"Failed to annotate EPIC genomeplots: {e}")
 
     # Regenerate stacked plots now that both cfRRBS and EPIC plots have been updated
     for metadata in pair_metadata:

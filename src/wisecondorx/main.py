@@ -672,6 +672,13 @@ def main():
         "file: chr...(/t)startpos(/t)endpos(/n)name. If not given, no regions will be marked.",
     )
     parser_epic.add_argument(
+        "--normalization-method",
+        type=str,
+        default="reference",
+        choices=["reference", "median"],
+        help="Normalization method passed to WisecondorX predict: 'reference' (default) or 'median'",
+    )
+    parser_epic.add_argument(
         "--overwrite",
         action="store_true",
         help="If set, remove existing contents of the output directory before writing",
