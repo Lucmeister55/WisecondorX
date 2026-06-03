@@ -510,230 +510,6 @@ def _load_aberrations_bed(bed_path: str) -> pd.DataFrame:
     return df.dropna(subset=["start", "end"])
 
 
-def _call_broad_gene_events(
-    detail_df: pd.DataFrame,
-    bins_df: pd.DataFrame,
-    conf: float = 0.99,
-) -> pd.DataFrame:
-    """
-    Broad gene calling: is gene ratio significantly different from diploid neutral?
-
-    K-means (k=3) on autosomal bin ratios identifies the neutral cluster (middle
-    centroid). Gene called gain/deletion if its ratio falls outside the neutral
-    CI (mu +/- z*sigma at conf).
-    """
-    from scipy.cluster.vq import kmeans2
-
-    empty = pd.DataFrame(columns=["gene", "chr", "start", "end", "ratio",
-                                   "zscore", "broad_call", "pval", "broad_low", "broad_high"])
-    if detail_df is None or detail_df.empty:
-        return empty
-
-    detail = detail_df.copy()
-    if "chr" in detail.columns:
-        detail["chr"] = detail["chr"].astype(str).apply(_normalize_chr)
-    for col in ["start", "end", "ratio"]:
-        if col in detail.columns:
-            detail[col] = pd.to_numeric(detail[col], errors="coerce")
-    if "zscore" in detail.columns:
-        detail["zscore"] = pd.to_numeric(detail["zscore"], errors="coerce")
-
-    OUTLIER_THRESH = 0.8
-    MIN_STATE_BINS = 5
-    zcrit = float(NormalDist().inv_cdf(1 - (1 - conf) / 2)) if conf < 1 else 2.576
-    neutral_low, neutral_high = -0.15, 0.15
-    neutral_mu, neutral_sigma = 0.0, 0.05
-
-    if bins_df is not None and not bins_df.empty:
-        bins = bins_df.copy()
-        if "chr" in bins.columns:
-            bins["chr"] = bins["chr"].astype(str).apply(_normalize_chr)
-        if "ratio" in bins.columns:
-            bins["ratio"] = pd.to_numeric(bins["ratio"], errors="coerce")
-        bins = bins.dropna(subset=["ratio"])
-        autosome = bins["chr"].apply(lambda c: c not in ("X", "Y", "chrX", "chrY"))
-        r_arr = bins.loc[autosome, "ratio"].values.astype(float)
-        r_arr = r_arr[np.abs(r_arr) <= OUTLIER_THRESH]
-
-        if len(r_arr) >= 15:
-            global_mu = float(np.mean(r_arr))
-            global_sigma = max(float(np.std(r_arr, ddof=1)), 0.05)
-            fallback_thr = (global_mu - zcrit * global_sigma, global_mu + zcrit * global_sigma)
-            init_centers = np.array([
-                np.percentile(r_arr, 15),
-                np.percentile(r_arr, 50),
-                np.percentile(r_arr, 85),
-            ])
-            try:
-                raw_centroids, labels = kmeans2(r_arr, init_centers, iter=20, minit='matrix')
-                order = np.argsort(raw_centroids)
-                label_remap = {int(old): i for i, old in enumerate(order)}
-                labels_sorted = np.array([label_remap[int(l)] for l in labels])
-                neutral_vals = r_arr[labels_sorted == 1]  # middle cluster = neutral
-                if len(neutral_vals) >= MIN_STATE_BINS:
-                    neutral_mu = float(np.mean(neutral_vals))
-                    neutral_sigma = max(float(np.std(neutral_vals, ddof=1)), 0.03)
-                    neutral_low = neutral_mu - zcrit * neutral_sigma
-                    neutral_high = neutral_mu + zcrit * neutral_sigma
-                else:
-                    neutral_low, neutral_high = fallback_thr
-                    neutral_mu = (neutral_low + neutral_high) / 2
-                    neutral_sigma = max((neutral_high - neutral_low) / (2 * zcrit), 0.03)
-            except Exception:
-                neutral_low, neutral_high = fallback_thr
-                neutral_mu = (neutral_low + neutral_high) / 2
-                neutral_sigma = max((neutral_high - neutral_low) / (2 * zcrit), 0.03)
-
-    rows = []
-    for _, row in detail.iterrows():
-        gene = str(row.get("name", row.get("gene", ""))).strip()
-        ratio = row.get("ratio", np.nan)
-        # Use pre-computed zscore if available (e.g. from WisecondorX _regions.bed),
-        # otherwise derive from neutral distribution.
-        zscore = row.get("zscore", np.nan)
-        if pd.isna(zscore) or not np.isfinite(float(zscore) if pd.notna(zscore) else float("nan")):
-            zscore = (float(ratio) - neutral_mu) / neutral_sigma if pd.notna(ratio) else np.nan
-        else:
-            zscore = float(zscore)
-        pval = float(2 * (1 - NormalDist().cdf(abs(zscore)))) if np.isfinite(zscore) else np.nan
-        call = "neutral"
-        if pd.notna(ratio):
-            if ratio > neutral_high:
-                call = "gain"
-            elif ratio < neutral_low:
-                call = "deletion"
-        rows.append({
-            "gene": gene,
-            "chr": row.get("chr"),
-            "start": row.get("start"),
-            "end": row.get("end"),
-            "ratio": ratio,
-            "zscore": zscore,
-            "broad_call": call,
-            "pval": pval,
-            "broad_low": neutral_low,
-            "broad_high": neutral_high,
-        })
-    return pd.DataFrame(rows)
-
-
-def _call_focal_gene_events(
-    detail_df: pd.DataFrame,
-    segments_df: pd.DataFrame,
-    bins_df: pd.DataFrame,
-    conf: float = 0.99,
-) -> pd.DataFrame:
-    """
-    Focal gene calling: does this gene deviate significantly from its own segment?
-
-    focal_dev = gene_ratio - segment_ratio
-    focal_z   = focal_dev / max(within_state_bin_sd, noise_floor)
-    Called if |focal_z| > z_crit.
-
-    At cfRRBS resolution (500 kb bins ~ segments) focal deviations will be near
-    zero — few focal calls is the expected and correct result.
-    """
-    from scipy.cluster.vq import kmeans2
-
-    empty = pd.DataFrame(columns=["gene", "chr", "start", "end", "ratio",
-                                   "zscore", "seg_ratio", "focal_dev", "focal_z", "focal_call", "pval"])
-    if detail_df is None or detail_df.empty:
-        return empty
-
-    detail = detail_df.copy()
-    if "chr" in detail.columns:
-        detail["chr"] = detail["chr"].astype(str).apply(_normalize_chr)
-    for col in ["start", "end", "ratio"]:
-        if col in detail.columns:
-            detail[col] = pd.to_numeric(detail[col], errors="coerce")
-    if "zscore" in detail.columns:
-        detail["zscore"] = pd.to_numeric(detail["zscore"], errors="coerce")
-
-    segments = pd.DataFrame()
-    if segments_df is not None and not segments_df.empty:
-        segments = segments_df.copy()
-        if "chr" in segments.columns:
-            segments["chr"] = segments["chr"].astype(str).apply(_normalize_chr)
-        for col in ["start", "end", "ratio"]:
-            if col in segments.columns:
-                segments[col] = pd.to_numeric(segments[col], errors="coerce")
-        segments = segments.dropna(subset=["chr", "start", "end", "ratio"])
-
-    OUTLIER_THRESH = 0.8
-    MIN_STATE_BINS = 5
-    NOISE_FLOOR = 0.05
-    zcrit = float(NormalDist().inv_cdf(1 - (1 - conf) / 2)) if conf < 1 else 2.576
-    state_sd = {0: NOISE_FLOOR, 1: NOISE_FLOOR, 2: NOISE_FLOOR}
-    centroids = np.array([-0.3, 0.0, 0.3])
-
-    if bins_df is not None and not bins_df.empty:
-        bins = bins_df.copy()
-        if "chr" in bins.columns:
-            bins["chr"] = bins["chr"].astype(str).apply(_normalize_chr)
-        if "ratio" in bins.columns:
-            bins["ratio"] = pd.to_numeric(bins["ratio"], errors="coerce")
-        bins = bins.dropna(subset=["ratio"])
-        autosome = bins["chr"].apply(lambda c: c not in ("X", "Y", "chrX", "chrY"))
-        r_arr = bins.loc[autosome, "ratio"].values.astype(float)
-        r_arr = r_arr[np.abs(r_arr) <= OUTLIER_THRESH]
-        if len(r_arr) >= 15:
-            init_centers = np.array([
-                np.percentile(r_arr, 15),
-                np.percentile(r_arr, 50),
-                np.percentile(r_arr, 85),
-            ])
-            try:
-                raw_centroids, labels = kmeans2(r_arr, init_centers, iter=20, minit='matrix')
-                order = np.argsort(raw_centroids)
-                centroids = raw_centroids[order]
-                label_remap = {int(old): i for i, old in enumerate(order)}
-                labels_sorted = np.array([label_remap[int(l)] for l in labels])
-                for i in range(3):
-                    state_vals = r_arr[labels_sorted == i]
-                    if len(state_vals) >= MIN_STATE_BINS:
-                        state_sd[i] = max(float(np.std(state_vals, ddof=1)), NOISE_FLOOR)
-            except Exception:
-                pass
-
-    def _seg_state(r):
-        return int(np.argmin(np.abs(centroids - r))) if pd.notna(r) else 1
-
-    rows = []
-    for _, row in detail.iterrows():
-        gene = str(row.get("name", row.get("gene", ""))).strip()
-        chrom = row.get("chr")
-        start = row.get("start")
-        end = row.get("end")
-        ratio = row.get("ratio", np.nan)
-
-        seg_ratio = float("nan")
-        if not segments.empty and pd.notna(chrom) and pd.notna(start) and pd.notna(end):
-            ov = segments[
-                (segments["chr"] == chrom)
-                & (segments["start"] < end)
-                & (segments["end"] > start)
-            ]
-            if not ov.empty:
-                seg_ratio = float(ov["ratio"].mean())
-
-        focal_dev = float("nan")
-        focal_z = float("nan")
-        call = "neutral"
-        if pd.notna(ratio) and pd.notna(seg_ratio):
-            focal_dev = ratio - seg_ratio
-            noise = state_sd.get(_seg_state(seg_ratio), NOISE_FLOOR)
-            focal_z = focal_dev / noise
-            if abs(focal_z) > zcrit:
-                call = "gain" if focal_z > 0 else "deletion"
-
-        zscore = float(row.get("zscore", np.nan))
-        focal_pval = float(2 * (1 - NormalDist().cdf(abs(focal_z)))) if np.isfinite(focal_z) else np.nan
-        rows.append({
-            "gene": gene, "chr": chrom, "start": start, "end": end,
-            "ratio": ratio, "zscore": zscore, "seg_ratio": seg_ratio,
-            "focal_dev": focal_dev, "focal_z": focal_z, "focal_call": call, "pval": focal_pval,
-        })
-    return pd.DataFrame(rows)
 
 
 def _plot_concordance_heatmap(
@@ -2419,7 +2195,21 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 cf_detail_df = pd.DataFrame()
 
         cf_broad_df = pd.DataFrame()  # broad calling removed
-        cf_focal_df = _call_focal_gene_events(cf_detail_df, cf_segments, cf_bins, conf=0.99)
+
+        # Read focal calls from predict_output (gold-standard segment-based)
+        cf_focal_df = pd.DataFrame(columns=["gene", "chr", "start", "end", "ratio",
+                                             "zscore", "seg_ratio", "seg_zscore", "focal_call", "pval"])
+        for call_type, label in [("amplified", "gain"), ("deleted", "deletion")]:
+            focal_path = os.path.join(cfrrbs_dir, f"{cfrrbs_id}_focal_{label}_genes.tsv")
+            if os.path.exists(focal_path):
+                try:
+                    tmp = pd.read_csv(focal_path, sep="\t")
+                    if not tmp.empty:
+                        tmp["focal_call"] = label
+                        cf_focal_df = pd.concat([cf_focal_df, tmp], ignore_index=True)
+                except Exception as e:
+                    logging.warning(f"[{pair_id}] Failed to read focal {label} genes: {e}")
+
         logging.info(
             f"[{pair_id}] cfRRBS focal: gain={sum(cf_focal_df['focal_call']=='gain')}, "
             f"deletion={sum(cf_focal_df['focal_call']=='deletion')}"

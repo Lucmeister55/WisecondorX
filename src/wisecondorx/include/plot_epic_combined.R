@@ -139,42 +139,31 @@ tryCatch({
       })
 
       tryCatch({
-        # Probes-per-bin count (for coverage distribution plots)
+        # Probes-per-bin count: x@bin contains bin-level data including probe counts
         probecount_out <- file.path(out_dir, paste0(epic_id, "_bins_probecount.tsv"))
-        anno <- x@anno
-        if (!is.null(anno) && nrow(anno) > 0) {
-          # Count probes per bin from the annotation
-          probe_counts <- as.data.frame(anno)[, c("Chromosome", "Start", "End")]
-          probe_counts$probes <- elementNROWS(x@anno)
-          if (all(probe_counts$probes == 1)) {
-            # elementNROWS gives 1 per row — use bin-level probe count from @bin if available
-            if (!is.null(x@bin) && !is.null(x@bin$probes)) {
-              bin_df <- as.data.frame(x@bin[, c("Chromosome", "Start", "End", "probes")])
-            } else {
-              bin_df <- as.data.frame(anno[, c("Chromosome", "Start", "End")])
-              bin_df$probes <- 1
-            }
-          } else {
-            bin_df <- probe_counts
-          }
-          write.table(bin_df, file = probecount_out, sep = "\t", row.names = FALSE, quote = FALSE)
+        bin_gr <- x@bin
+        bin_df <- as.data.frame(bin_gr)
+        # Column names vary by conumee2 version — seqnames/start/end or Chromosome/Start/End
+        chr_col   <- if ("seqnames"   %in% names(bin_df)) "seqnames"   else "Chromosome"
+        start_col <- if ("start"      %in% names(bin_df)) "start"      else "Start"
+        end_col   <- if ("end"        %in% names(bin_df)) "end"        else "End"
+        probe_col <- if ("nprobes"    %in% names(bin_df)) "nprobes"    else
+                     if ("probes"     %in% names(bin_df)) "probes"     else
+                     if ("num.mark"   %in% names(bin_df)) "num.mark"   else NULL
+        if (!is.null(probe_col)) {
+          out_df <- data.frame(
+            seqnames = bin_df[[chr_col]],
+            start    = bin_df[[start_col]],
+            end      = bin_df[[end_col]],
+            probes   = bin_df[[probe_col]]
+          )
+          write.table(out_df, file = probecount_out, sep = "\t", row.names = FALSE, quote = FALSE)
           cat(paste("    Wrote probecount to", probecount_out, "\n"))
+        } else {
+          cat(paste("    Note: no probe count column found in x@bin, skipping probecount\n"))
         }
       }, error = function(e) {
-        # Fallback: build probecount from bins TSV if it has a probes column
-        tryCatch({
-          bins_path <- file.path(out_dir, paste0(epic_id, "_bins.tsv"))
-          if (file.exists(bins_path)) {
-            bins_df <- read.table(bins_path, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
-            if ("probes" %in% colnames(bins_df)) {
-              probecount_out <- file.path(out_dir, paste0(epic_id, "_bins_probecount.tsv"))
-              write.table(bins_df[, c("Chromosome", "Start", "End", "probes")],
-                          file = probecount_out, sep = "\t", row.names = FALSE, quote = FALSE)
-            }
-          }
-        }, error = function(e2) {
-          cat(paste("    Warning: Failed to write probecount:", e$message, "\n"))
-        })
+        cat(paste("    Warning: Failed to write probecount:", e$message, "\n"))
       })
       
       tryCatch({
