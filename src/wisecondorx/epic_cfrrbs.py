@@ -827,54 +827,53 @@ def _segments_overlap(seg_a, seg_b) -> bool:
 
 
 def _pair_bins_by_overlap(cf_bins: pd.DataFrame, epic_bins: pd.DataFrame) -> pd.DataFrame:
+    """Pair cfRRBS and EPIC bins by overlap.
+    Since epic_bins are already aggregated to cfRRBS boundaries via
+    _aggregate_epic_bins_to_cfrrbs, this is a direct positional merge.
+    Falls back to merge_asof per chromosome for safety.
+    """
+    if cf_bins.empty or epic_bins.empty:
+        return pd.DataFrame(columns=["ratio_cf", "ratio_epic", "n_overlap"])
+
+    # Fast path: if epic bins already match cfRRBS boundaries exactly
+    try:
+        merged = cf_bins[["chr", "start", "end", "ratio"]].merge(
+            epic_bins[["chr", "start", "end", "ratio"]],
+            on=["chr", "start", "end"], how="inner", suffixes=("_cf", "_epic"))
+        if not merged.empty:
+            merged["n_overlap"] = 1
+            return merged[["ratio_cf", "ratio_epic", "n_overlap"]].dropna()
+    except Exception:
+        pass
+
+    # Fallback: merge_asof per chromosome
     rows = []
-    cf_chrs = cf_bins["chr"].unique()
-    epic_chrs = epic_bins["chr"].unique()
-    common_chrs = set(cf_chrs) & set(epic_chrs)
-    logging.debug(f"Common chromosomes: {len(common_chrs)} of cf={len(cf_chrs)}, epic={len(epic_chrs)}")
-    
     for chr_name in cf_bins["chr"].unique():
         cf_chr = cf_bins[cf_bins["chr"] == chr_name].sort_values("start")
         ep_chr = epic_bins[epic_bins["chr"] == chr_name].sort_values("start")
-        
         if cf_chr.empty or ep_chr.empty:
-            logging.debug(f"Chromosome {chr_name}: cf_empty={cf_chr.empty}, ep_empty={ep_chr.empty}")
             continue
-        
-        logging.debug(f"Chromosome {chr_name}: {len(cf_chr)} cf_bins, {len(ep_chr)} epic_bins")
-
         ep_starts = ep_chr["start"].to_numpy()
-        ep_ends = ep_chr["end"].to_numpy()
+        ep_ends   = ep_chr["end"].to_numpy()
         ep_ratios = ep_chr["ratio"].to_numpy()
-
+        cf_starts = cf_chr["start"].to_numpy()
+        cf_ends   = cf_chr["end"].to_numpy()
+        cf_ratios = cf_chr["ratio"].to_numpy()
         ep_idx = 0
         ep_len = len(ep_chr)
-        for _, cf_row in cf_chr.iterrows():
-            cf_start = cf_row["start"]
-            cf_end = cf_row["end"]
-
-            while ep_idx < ep_len and ep_ends[ep_idx] < cf_start:
+        for i in range(len(cf_chr)):
+            cf_s, cf_e, cf_r = int(cf_starts[i]), int(cf_ends[i]), cf_ratios[i]
+            while ep_idx < ep_len and ep_ends[ep_idx] < cf_s:
                 ep_idx += 1
-
-            j = ep_idx
-            overlap_ratios = []
-            while j < ep_len and ep_starts[j] <= cf_end:
-                if ep_ends[j] >= cf_start:
-                    overlap_ratios.append(ep_ratios[j])
+            j, overlap = ep_idx, []
+            while j < ep_len and ep_starts[j] <= cf_e:
+                if ep_ends[j] >= cf_s:
+                    overlap.append(ep_ratios[j])
                 j += 1
-
-            if overlap_ratios:
-                rows.append(
-                    {
-                        "ratio_cf": cf_row["ratio"],
-                        "ratio_epic": float(np.nanmean(overlap_ratios)),
-                        "n_overlap": len(overlap_ratios),
-                    }
-                )
-    
-    result_df = pd.DataFrame(rows)
-    logging.debug(f"Total overlapping bin pairs found: {len(result_df)}")
-    return result_df
+            if overlap:
+                rows.append({"ratio_cf": cf_r, "ratio_epic": float(np.nanmean(overlap)),
+                             "n_overlap": len(overlap)})
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["ratio_cf", "ratio_epic", "n_overlap"])
 
 
 def _compute_correlations(cf_bins: pd.DataFrame, epic_bins: pd.DataFrame) -> Dict[str, float]:
@@ -1053,35 +1052,36 @@ def _pair_segments_by_overlap(cf_segments: pd.DataFrame, epic_segments: pd.DataF
 
 
 def _aggregate_epic_bins_to_cfrrbs(epic_bins: pd.DataFrame, cf_bins: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate EPIC bins to match cfRRBS bin boundaries for better pairing.
-    
-    Since cfRRBS bins are much larger, we group EPIC bins that fall within each cfRRBS bin
-    and take the mean ratio.
+    """Aggregate EPIC bins to match cfRRBS bin boundaries.
+    Vectorized via merge_asof per chromosome — O(n log n) instead of O(n×m).
     """
+    if epic_bins.empty or cf_bins.empty:
+        return pd.DataFrame(columns=["chr", "start", "end", "ratio"])
+
     aggregated = []
-    for _, cf_row in cf_bins.iterrows():
-        cf_chr = cf_row["chr"]
-        cf_start = cf_row["start"]
-        cf_end = cf_row["end"]
-        
-        # Find all EPIC bins within this cfRRBS bin
-        overlapping = epic_bins[
-            (epic_bins["chr"] == cf_chr) & 
-            (epic_bins["start"] < cf_end) & 
-            (epic_bins["end"] > cf_start)
-        ]
-        
-        if not overlapping.empty:
-            # Aggregate with mean ratio
-            mean_ratio = overlapping["ratio"].mean()
-            aggregated.append({
-                "chr": cf_chr,
-                "start": cf_start,
-                "end": cf_end,
-                "ratio": mean_ratio,
-            })
-    
-    return pd.DataFrame(aggregated)
+    for chr_name in cf_bins["chr"].unique():
+        cf_chr = cf_bins[cf_bins["chr"] == chr_name][["start", "end", "ratio"]].copy()
+        ep_chr = epic_bins[epic_bins["chr"] == chr_name][["start", "end", "ratio"]].copy()
+        if cf_chr.empty or ep_chr.empty:
+            continue
+        # Assign each EPIC bin to the cfRRBS bin whose start is the largest ≤ epic start
+        ep_chr = ep_chr.sort_values("start").reset_index(drop=True)
+        cf_chr = cf_chr.sort_values("start").reset_index(drop=True)
+        merged = pd.merge_asof(ep_chr, cf_chr[["start", "end"]].rename(
+            columns={"start": "cf_start", "end": "cf_end"}),
+            left_on="start", right_on="cf_start", direction="backward")
+        # Keep only epic bins that actually fall within the cfRRBS bin
+        merged = merged[(merged["start"] < merged["cf_end"]) & (merged["end"] > merged["cf_start"])]
+        if merged.empty:
+            continue
+        grouped = (merged.groupby(["cf_start", "cf_end"])["ratio"]
+                         .mean().reset_index()
+                         .rename(columns={"cf_start": "start", "cf_end": "end", "ratio": "ratio"}))
+        grouped["chr"] = chr_name
+        aggregated.append(grouped[["chr", "start", "end", "ratio"]])
+
+    return pd.concat(aggregated, ignore_index=True) if aggregated else pd.DataFrame(
+        columns=["chr", "start", "end", "ratio"])
 
 
 def _compute_segment_correlations(
@@ -1186,6 +1186,138 @@ def _plot_scatter(df: pd.DataFrame, out_png: str, title_prefix: str = "", corr: 
     plt.tight_layout()
     plt.savefig(out_png, dpi=150)
     plt.close()
+
+
+def _load_epic_probe_counts(epic_dir: str, epic_id: str) -> pd.Series:
+    """Load EPIC probes-per-bin counts. Tries _bins_probecount.tsv first,
+    falls back to 'probes' column in _bins.tsv (conumee2 format)."""
+    # Old format: separate probecount file
+    probecount_path = os.path.join(epic_dir, f"{epic_id}_bins_probecount.tsv")
+    if os.path.exists(probecount_path):
+        try:
+            ep = pd.read_csv(probecount_path, sep="\t")
+            probe_col = next((c for c in ep.columns if "probe" in c.lower()), None)
+            if probe_col is None and ep.shape[1] >= 4:
+                probe_col = ep.columns[3]
+            if probe_col:
+                return pd.to_numeric(ep[probe_col], errors="coerce").dropna()
+        except Exception:
+            pass
+
+    # New format: _bins.tsv with 'probes' column
+    bins_path = os.path.join(epic_dir, f"{epic_id}_bins.tsv")
+    if os.path.exists(bins_path):
+        try:
+            ep = pd.read_csv(bins_path, sep="\t")
+            probe_col = next((c for c in ep.columns if "probe" in c.lower()), None)
+            if probe_col:
+                return pd.to_numeric(ep[probe_col], errors="coerce").dropna()
+        except Exception:
+            pass
+
+    return pd.Series(dtype=float)
+
+
+def _plot_coverage_distributions(
+    cfrrbs_bins_stats_path: str,
+    epic_probe_counts: pd.Series,
+    out_png: str,
+    pair_id: str,
+) -> None:
+    """Plot per-bin read/probe count distributions for cfRRBS and EPIC."""
+    try:
+        import matplotlib.pyplot as plt
+        from scipy.stats import gaussian_kde
+
+        fig, axes = plt.subplots(2, 1, figsize=(8, 6))
+        fig.suptitle(f"Coverage per raw bin — {pair_id}", fontweight="bold")
+
+        # EPIC: probes per bin
+        ax = axes[0]
+        if epic_probe_counts is not None and len(epic_probe_counts) > 0:
+            try:
+                counts = epic_probe_counts[epic_probe_counts > 0]
+                if len(counts) >= 5:
+                    log_counts = np.log10(counts)
+                    kde = gaussian_kde(log_counts)
+                    xs = np.linspace(log_counts.min(), log_counts.max(), 300)
+                    ax.plot(xs, kde(xs), color="#2980b9", lw=1.5)
+                    ax.axvline(np.log10(float(counts.median())), color="red", lw=1.2,
+                               linestyle="--", label=f"median={int(counts.median())}")
+                    ax.legend(fontsize=8, framealpha=0.7)
+            except Exception as e:
+                logging.debug(f"EPIC probecount plot failed: {e}")
+        ax.set_xlabel("Probes per bin (log₁₀)")
+        ax.set_ylabel("Density")
+        ax.set_title("EPIC (probes per raw bin)")
+
+        # cfRRBS: reads per bin
+        ax = axes[1]
+        if cfrrbs_bins_stats_path and os.path.exists(cfrrbs_bins_stats_path):
+            try:
+                cf = pd.read_csv(cfrrbs_bins_stats_path, sep="\t")
+                if "reads" in cf.columns:
+                    counts = pd.to_numeric(cf["reads"], errors="coerce").dropna()
+                    counts = counts[counts >= 0]
+                    log_counts = np.log10(counts + 1)
+                    kde = gaussian_kde(log_counts)
+                    xs = np.linspace(log_counts.min(), log_counts.max(), 300)
+                    ax.plot(xs, kde(xs), color="#2980b9", lw=1.5)
+                    ax.axvline(np.log10(np.median(counts) + 1), color="red", lw=1.2,
+                               linestyle="--", label=f"median={int(np.median(counts))}")
+                    ax.legend(fontsize=8, framealpha=0.7)
+            except Exception as e:
+                logging.debug(f"cfRRBS reads plot failed: {e}")
+        ax.set_xlabel("Reads per bin (log₁₀)")
+        ax.set_ylabel("Density")
+        ax.set_title("cfRRBS (reads per raw bin)")
+
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as e:
+        logging.warning(f"coverage_distributions plot failed: {e}")
+
+
+def _plot_summary_coverage_distributions(report_rows: List[Dict], outdir: str) -> None:
+    """Summary-level coverage distributions across all samples."""
+    try:
+        import matplotlib.pyplot as plt
+
+        epic_medians = [r.get("epic_median_probes") for r in report_rows
+                        if r.get("epic_median_probes") is not None]
+        cf_medians = [r.get("cfrrbs_median_reads") for r in report_rows
+                      if r.get("cfrrbs_median_reads") is not None]
+
+        if not epic_medians and not cf_medians:
+            return
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        fig.suptitle("Coverage summary across samples", fontweight="bold")
+
+        if epic_medians:
+            axes[0].hist(epic_medians, bins=20, color="#2980b9", alpha=0.75, edgecolor="white")
+            axes[0].axvline(np.median(epic_medians), color="red", lw=1.2, linestyle="--",
+                            label=f"median={np.median(epic_medians):.0f}")
+            axes[0].set_xlabel("Median probes per bin")
+            axes[0].set_ylabel("Samples")
+            axes[0].set_title("EPIC probes per bin")
+            axes[0].legend(fontsize=8)
+
+        if cf_medians:
+            axes[1].hist(cf_medians, bins=20, color="#2980b9", alpha=0.75, edgecolor="white")
+            axes[1].axvline(np.median(cf_medians), color="red", lw=1.2, linestyle="--",
+                            label=f"median={np.median(cf_medians):.0f}")
+            axes[1].set_xlabel("Median reads per bin")
+            axes[1].set_ylabel("Samples")
+            axes[1].set_title("cfRRBS reads per bin")
+            axes[1].legend(fontsize=8)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, "coverage_distributions.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as e:
+        logging.warning(f"Summary coverage_distributions plot failed: {e}")
 
 
 def _plot_epic_summary(rds_list: List[Tuple[str, str, str]], outdir: str) -> None:
@@ -1468,6 +1600,174 @@ def _annotate_epic_genome_plots(samples: List[Dict], wd: str) -> None:
                 pass
 
 
+def _plot_gene_distributions(pair_metadata: List[Dict], all_focal_records: List[Dict],
+                             all_focal_gene_calls: List[Dict], summary_dir: str,
+                             gene_dist_data: Dict = None) -> None:
+    """Generate per-gene summary plots using pre-collected data (no file re-reads)."""
+    try:
+        import matplotlib.pyplot as plt
+        from scipy import stats as _stats
+
+        gene_distrib_dir = os.path.join(summary_dir, "gene_distributions")
+        for sub in ["log2ratio_cfrrbs", "log2ratio_epic", "scatter_cfrrbs_vs_epic",
+                    "segment_length_cfrrbs", "segment_length_epic"]:
+            os.makedirs(os.path.join(gene_distrib_dir, sub), exist_ok=True)
+
+        if gene_dist_data is None:
+            gene_dist_data = {}
+
+        gene_cf_ratios  = gene_dist_data.get("cf_ratios", {})
+        gene_ep_ratios  = gene_dist_data.get("ep_ratios", {})
+        gene_cf_seglens = gene_dist_data.get("cf_seglens", {})
+        gene_ep_seglens = gene_dist_data.get("ep_seglens", {})
+
+        all_genes = sorted(set(list(gene_cf_ratios.keys()) + list(gene_ep_ratios.keys())))
+
+        for gene in all_genes:
+            safe_name = gene.replace("/", "_")
+            cf_r = gene_cf_ratios.get(gene, [])
+            ep_r = gene_ep_ratios.get(gene, [])
+            cf_sl = gene_cf_seglens.get(gene, [])
+            ep_sl = gene_ep_seglens.get(gene, [])
+
+            # log2 ratio distribution cfRRBS
+            if cf_r:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.hist(cf_r, bins=min(30, max(5, len(cf_r))), color="#2980b9", alpha=0.75, edgecolor="white")
+                med = float(np.median(cf_r))
+                ax.axvline(med, color="black", lw=1.2, label=f"median={med:.2f}")
+                ax.axvline(0, color="grey", lw=0.8, linestyle="--", alpha=0.5)
+                ax.set_xlabel("log2 ratio (cfRRBS)"); ax.set_ylabel("Count")
+                ax.set_title(f"{gene}  (n={len(cf_r)})"); ax.legend(fontsize=7)
+                plt.tight_layout()
+                plt.savefig(os.path.join(gene_distrib_dir, "log2ratio_cfrrbs", f"{safe_name}.png"), dpi=120)
+                plt.close(fig)
+
+            # log2 ratio distribution EPIC
+            if ep_r:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.hist(ep_r, bins=min(30, max(5, len(ep_r))), color="#e67e22", alpha=0.75, edgecolor="white")
+                med = float(np.median(ep_r))
+                ax.axvline(med, color="black", lw=1.2, label=f"median={med:.2f}")
+                ax.axvline(0, color="grey", lw=0.8, linestyle="--", alpha=0.5)
+                ax.set_xlabel("log2 ratio (conumee2)"); ax.set_ylabel("Count")
+                ax.set_title(f"{gene}  (n={len(ep_r)})"); ax.legend(fontsize=7)
+                plt.tight_layout()
+                plt.savefig(os.path.join(gene_distrib_dir, "log2ratio_epic", f"{safe_name}.png"), dpi=120)
+                plt.close(fig)
+
+            # cfRRBS vs EPIC scatter
+            if cf_r and ep_r:
+                common = min(len(cf_r), len(ep_r))
+                x, y = ep_r[:common], cf_r[:common]
+                fig, ax = plt.subplots(figsize=(4, 4))
+                ax.scatter(x, y, s=25, alpha=0.6, color="#7f8c8d", edgecolor="white")
+                ax.axhline(0, color="grey", lw=0.6, linestyle="--")
+                ax.axvline(0, color="grey", lw=0.6, linestyle="--")
+                if common >= 3:
+                    r, p = _stats.pearsonr(x, y)
+                    m, b = np.polyfit(x, y, 1)
+                    xs = np.linspace(min(x), max(x), 100)
+                    ax.plot(xs, m * xs + b, color="red", lw=1.5,
+                            label=f"r={r:.2f} p={p:.2e}")
+                    ax.legend(fontsize=7)
+                ax.set_xlabel("conumee2 log2 ratio"); ax.set_ylabel("cfRRBS log2 ratio")
+                ax.set_title(f"{gene}  (n={common} samples)")
+                plt.tight_layout()
+                plt.savefig(os.path.join(gene_distrib_dir, "scatter_cfrrbs_vs_epic", f"{safe_name}.png"), dpi=120)
+                plt.close(fig)
+
+            # Segment length cfRRBS
+            if cf_sl:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.hist(cf_sl, bins=min(30, max(5, len(cf_sl))), color="#2980b9", alpha=0.75, edgecolor="white")
+                ax.axvline(3.0, color="red", lw=1, linestyle="--", alpha=0.7, label="3 Mb focal")
+                ax.set_xlabel("Segment length (Mb)"); ax.set_ylabel("Count")
+                ax.set_title(f"{gene}  cfRRBS segments"); ax.legend(fontsize=7)
+                plt.tight_layout()
+                plt.savefig(os.path.join(gene_distrib_dir, "segment_length_cfrrbs", f"{safe_name}.png"), dpi=120)
+                plt.close(fig)
+
+            # Segment length EPIC
+            if ep_sl:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.hist(ep_sl, bins=min(30, max(5, len(ep_sl))), color="#e67e22", alpha=0.75, edgecolor="white")
+                ax.axvline(3.0, color="red", lw=1, linestyle="--", alpha=0.7, label="3 Mb focal")
+                ax.set_xlabel("Segment length (Mb)"); ax.set_ylabel("Count")
+                ax.set_title(f"{gene}  conumee2 segments"); ax.legend(fontsize=7)
+                plt.tight_layout()
+                plt.savefig(os.path.join(gene_distrib_dir, "segment_length_epic", f"{safe_name}.png"), dpi=120)
+                plt.close(fig)
+
+        logging.info(f"Gene distributions saved to {gene_distrib_dir}")
+    except Exception as e:
+        logging.warning(f"Failed to generate gene distributions: {e}")
+
+
+def _plot_global_segment_lengths(pair_metadata: List[Dict], summary_dir: str) -> None:
+    """Global segment length histograms across all cfRRBS and conumee2 segments."""
+    try:
+        import matplotlib.pyplot as plt
+
+        all_cf_segs, all_ep_segs = [], []
+        for meta in pair_metadata:
+            cf_seg_f = os.path.join(meta["cfrrbs_dir"],
+                                    next((f for f in os.listdir(meta["cfrrbs_dir"])
+                                          if f.endswith("_segments.bed")), ""))
+            ep_seg_f = os.path.join(meta["epic_dir"],
+                                    next((f for f in os.listdir(meta["epic_dir"])
+                                          if f.endswith("_segments.tsv")), ""))
+            if os.path.exists(cf_seg_f):
+                try:
+                    df = pd.read_csv(cf_seg_f, sep="\t", comment="#")
+                    sizes = (pd.to_numeric(df["end"], errors="coerce") -
+                             pd.to_numeric(df["start"], errors="coerce")) / 1e6
+                    all_cf_segs.extend(sizes.dropna().tolist())
+                except Exception:
+                    pass
+            if os.path.exists(ep_seg_f):
+                try:
+                    df = pd.read_csv(ep_seg_f, sep="\t")
+                    s_col = next((c for c in df.columns
+                                  if c.lower() in ("start",) or c.lower().endswith(".loc.start")
+                                  or c.lower().endswith(".start")), None)
+                    e_col = next((c for c in df.columns
+                                  if c.lower() in ("end",) or c.lower().endswith(".loc.end")
+                                  or c.lower().endswith(".end")), None)
+                    if s_col and e_col:
+                        sizes = (pd.to_numeric(df[e_col], errors="coerce") -
+                                 pd.to_numeric(df[s_col], errors="coerce")) / 1e6
+                        all_ep_segs.extend(sizes.dropna().tolist())
+                except Exception:
+                    pass
+
+        for label, sizes, color, fname in [
+            ("cfRRBS", all_cf_segs, "#2980b9", "segment_length_global_cfrrbs.png"),
+            ("conumee2", all_ep_segs, "#e67e22", "segment_length_global_conumee2.png"),
+        ]:
+            if not sizes:
+                continue
+            arr = np.array(sizes)
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            fig.suptitle(f"{label} — global segment length distribution  (n={len(arr)} segments)",
+                         fontweight="bold")
+            axes[0].hist(arr[arr > 0], bins=50, color=color, alpha=0.75, edgecolor="white")
+            axes[0].set_xscale("log"); axes[0].set_xlabel("Segment length (Mb, log scale)")
+            axes[0].set_ylabel("Count"); axes[0].set_title("All lengths (log scale)")
+            arr50 = arr[arr <= 50]
+            if len(arr50):
+                axes[1].hist(arr50, bins=50, color=color, alpha=0.75, edgecolor="white")
+                axes[1].axvline(3.0, color="grey", lw=1.2, linestyle="--", label="3 Mb")
+                axes[1].set_xlabel("Segment length (Mb)"); axes[1].set_ylabel("Count")
+                axes[1].set_title("Segments ≤ 50 Mb"); axes[1].legend(fontsize=8)
+            plt.tight_layout()
+            plt.savefig(os.path.join(summary_dir, fname), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logging.info(f"Segment length global plot saved: {fname}")
+    except Exception as e:
+        logging.warning(f"Failed to generate global segment length plots: {e}")
+
+
 def _collect_genome_wide_stacked_plots(outdir: str, pair_metadata: List[Dict]) -> None:
     """
     Collect all genome-wide CNV plots (epic, cfrrbs, stacked) from sample pairs
@@ -1631,29 +1931,24 @@ def _aggregate_gene_concordance_stats(records: List[Dict], call_type: str, expec
         # Lookup expected alteration
         expected_alt = expected_alterations.get(gene.lower(), "")
         
+        pct = lambda n: round(100 * n / n_total, 1) if n_total > 0 else 0.0
         gene_stats.append({
             "gene": gene,
             "expected_alteration": expected_alt,
-            "call_type": call_type,
             "n_samples": n_total,
-            "epic_only_count": epic_only,
-            "epic_only_pct": 100 * epic_only / n_total if n_total > 0 else 0,
-            "cfrrbs_only_count": cfrrbs_only,
-            "cfrrbs_only_pct": 100 * cfrrbs_only / n_total if n_total > 0 else 0,
-            "both_same_dir_count": both_concordant,
-            "both_same_dir_pct": 100 * both_concordant / n_total if n_total > 0 else 0,
-            "both_opp_dir_count": both_discordant,
-            "both_opp_dir_pct": 100 * both_discordant / n_total if n_total > 0 else 0,
-            "neutral_both_count": neutral_both,
-            "neutral_both_pct": 100 * neutral_both / n_total if n_total > 0 else 0,
+            "both_gain": both_gain,
+            "both_del": both_del,
             "epic_gain_only": epic_gain_only,
             "epic_del_only": epic_del_only,
             "cfrrbs_gain_only": cfrrbs_gain_only,
             "cfrrbs_del_only": cfrrbs_del_only,
-            "both_gain": both_gain,
-            "both_del": both_del,
             "discordant_epic_gain": discordant_epic_gain,
             "discordant_epic_del": discordant_epic_del,
+            "neutral_both": neutral_both,
+            "conc_pct": pct(both_gain + both_del),
+            "disc_pct": pct(discordant_epic_gain + discordant_epic_del),
+            "epic_only_pct": pct(epic_gain_only + epic_del_only),
+            "cfrrbs_only_pct": pct(cfrrbs_gain_only + cfrrbs_del_only),
         })
     
     return pd.DataFrame(gene_stats)
@@ -1661,15 +1956,14 @@ def _aggregate_gene_concordance_stats(records: List[Dict], call_type: str, expec
 
 def _plot_gene_concordance_table(gene_stats: pd.DataFrame, call_type: str, outdir: str) -> None:
     """
-    Render gene_stats as a prettified PNG table that mirrors the concordance_summary.csv.
-
-    All columns from the DataFrame are shown (minus call_type, which is in the title).
-    Numeric cells are shaded with a single blue gradient scaled to each column's max.
-    The expected_alteration column is green for 'amp' and red for 'del'.
+    Render concordance summary as a colour-coded PNG table matching the old format.
+    Columns are grouped by category with distinct header colours matching the legend:
+      identity (dark), concordant (teal), EPIC only (orange), cfRRBS only (purple),
+      opposite (red), neutral (grey), summary % (dark).
     """
     try:
         import matplotlib.pyplot as plt
-        from matplotlib.colors import to_rgba
+        import matplotlib.patches as mpatches
     except ImportError:
         logging.warning("matplotlib not available; skipping gene concordance table")
         return
@@ -1677,111 +1971,147 @@ def _plot_gene_concordance_table(gene_stats: pd.DataFrame, call_type: str, outdi
     if gene_stats.empty:
         return
 
-    df = gene_stats.sort_values("n_samples", ascending=False).reset_index(drop=True)
-    # Drop call_type — redundant with title
-    df = df.drop(columns=["call_type"], errors="ignore")
+    df = gene_stats.drop(columns=["call_type"], errors="ignore").reset_index(drop=True)
 
-    # Round pct columns for display
-    pct_cols = [c for c in df.columns if c.endswith("_pct")]
-    for c in pct_cols:
-        df[c] = df[c].round(1)
+    # Sort: del genes first (expected_alteration), then by n_samples desc
+    if "expected_alteration" in df.columns:
+        df = df.sort_values(["expected_alteration", "n_samples"], ascending=[True, False])
+    df = df.reset_index(drop=True)
 
-    col_names = list(df.columns)
-    n_cols = len(col_names)
-    n_rows = len(df)
+    # Round pct columns
+    for c in df.columns:
+        if c.endswith("_pct") and pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = df[c].round(1)
 
-    # Pre-compute per-column max for numeric columns (used for gradient scaling)
-    col_max = {}
-    for c in col_names:
-        if pd.api.types.is_numeric_dtype(df[c]):
-            m = df[c].max()
-            col_max[c] = m if m > 0 else 1.0
+    # Column groups: header colour, cell colour per category
+    COL_GROUPS = {
+        "gene":             ("#1a252f", "#1a252f"),
+        "expected_alteration": ("#1a252f", "#1a252f"),
+        "n_samples":        ("#1a252f", "#1a252f"),
+        "both_gain":        ("#1a7d6e", "#d0f0eb"),
+        "both_del":         ("#1a7d6e", "#d0f0eb"),
+        "epic_gain_only":   ("#c0671a", "#fde8d0"),
+        "epic_del_only":    ("#c0671a", "#fde8d0"),
+        "cfrrbs_gain_only": ("#7b3f9e", "#ead5f7"),
+        "cfrrbs_del_only":  ("#7b3f9e", "#ead5f7"),
+        "discordant_epic_gain": ("#9e2020", "#f7d5d5"),
+        "discordant_epic_del":  ("#9e2020", "#f7d5d5"),
+        "neutral_both":     ("#5a6472", "#e8eaed"),
+        "conc_pct":         ("#1a252f", "#dce8f0"),
+        "disc_pct":         ("#1a252f", "#dce8f0"),
+        "epic_only_pct":    ("#1a252f", "#dce8f0"),
+        "cfrrbs_only_pct":  ("#1a252f", "#dce8f0"),
+    }
 
-    # Format cell text
+    col_names = [c for c in COL_GROUPS if c in df.columns]
+    # add any remaining columns not in the group map at end
+    col_names += [c for c in df.columns if c not in col_names]
+    n_cols, n_rows = len(col_names), len(df)
+
+    # Build display text
     table_rows = []
     for _, row in df.iterrows():
         cells = []
         for c in col_names:
-            v = row[c]
+            v = row.get(c, "")
             if pd.isna(v) or v == "":
-                cells.append("")
+                cells.append("—")
             elif isinstance(v, float):
                 cells.append(f"{v:.1f}")
             else:
                 cells.append(str(v))
         table_rows.append(cells)
 
-    # Figure sizing: wider for many columns
-    fig_h = max(3.0, n_rows * 0.45 + 1.5)
-    fig_w = max(10, n_cols * 1.1)
+    # Short display labels
+    LABELS = {
+        "gene": "Gene", "expected_alteration": "Exp.", "n_samples": "N",
+        "both_gain": "Both↑", "both_del": "Both↓",
+        "epic_gain_only": "EPIC↑", "epic_del_only": "EPIC↓",
+        "cfrrbs_gain_only": "cfR↑", "cfrrbs_del_only": "cfR↓",
+        "discordant_epic_gain": "EPIC↑cfR↓", "discordant_epic_del": "EPIC↓cfR↑",
+        "neutral_both": "Neutral",
+        "conc_pct": "Conc%", "disc_pct": "Disc%",
+        "epic_only_pct": "EPIC%", "cfrrbs_only_pct": "cfR%",
+    }
+    col_labels = [LABELS.get(c, c) for c in col_names]
+
+    fig_h = max(4.0, n_rows * 0.38 + 2.0)
+    fig_w = max(12, n_cols * 0.95)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.axis("off")
 
-    # Equal-width columns; gene column slightly wider
-    gene_col_idx = col_names.index("gene") if "gene" in col_names else 0
-    col_widths = [1.0] * n_cols
-    col_widths[gene_col_idx] = 2.0
+    col_widths = [2.2 if c == "gene" else 0.8 for c in col_names]
     total_w = sum(col_widths)
     col_widths = [w / total_w for w in col_widths]
 
     tbl = ax.table(
         cellText=table_rows,
-        colLabels=col_names,
+        colLabels=col_labels,
         cellLoc="center",
         loc="center",
         colWidths=col_widths,
     )
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(8)
-    tbl.scale(1, 2.0)
+    tbl.set_fontsize(7.5)
+    tbl.scale(1, 1.8)
 
-    # Header styling
-    for j in range(n_cols):
+    EXP_COLORS = {"amp": "#c8f7c5", "del": "#f7c5c5"}
+
+    for j, c in enumerate(col_names):
+        hdr_color, cell_bg = COL_GROUPS.get(c, ("#2c3e50", "white"))
         cell = tbl[(0, j)]
-        cell.set_facecolor("#2c3e50")
-        cell.set_text_props(weight="bold", color="white", fontsize=8)
-
-    # Gradient color: single steelblue hue
-    GRAD_R, GRAD_G, GRAD_B, _ = to_rgba("#2980b9")
-    EXP_COLORS = {"amp": "#d5f5e3", "del": "#fadbd8"}  # light green / light red
-
-    exp_col_idx = col_names.index("expected_alteration") if "expected_alteration" in col_names else None
+        cell.set_facecolor(hdr_color)
+        cell.set_text_props(weight="bold", color="white", fontsize=7)
 
     for i in range(1, n_rows + 1):
-        row_bg = "#f2f3f4" if i % 2 == 0 else "white"
-        for j, col in enumerate(col_names):
+        alt_bg = "#f5f5f5" if i % 2 == 0 else "white"
+        for j, c in enumerate(col_names):
             cell = tbl[(i, j)]
             raw = table_rows[i - 1][j]
+            _, cell_bg = COL_GROUPS.get(c, ("#2c3e50", alt_bg))
 
-            if j == exp_col_idx:
-                bg = EXP_COLORS.get(str(raw).strip().lower(), row_bg)
+            if c == "expected_alteration":
+                bg = EXP_COLORS.get(raw.strip().lower(), alt_bg)
                 cell.set_facecolor(bg)
-                cell.set_text_props(fontsize=8, weight="bold" if raw else "normal")
-            elif col in col_max:
-                try:
-                    v = float(raw) if raw else 0.0
-                except ValueError:
-                    v = 0.0
-                alpha = min(0.85, 0.08 + 0.77 * (v / col_max[col])) if v > 0 else 0.0
-                if alpha > 0:
-                    cell.set_facecolor((GRAD_R, GRAD_G, GRAD_B, alpha))
-                    cell.set_text_props(fontsize=8,
-                                        color="white" if alpha > 0.55 else "black")
-                else:
-                    cell.set_facecolor(row_bg)
-                    cell.set_text_props(fontsize=8, color="#999999")
+                cell.set_text_props(fontsize=7.5, weight="bold")
+            elif c == "gene":
+                cell.set_facecolor(alt_bg)
+                cell.set_text_props(fontsize=7.5, weight="bold", ha="left")
+            elif c == "n_samples":
+                cell.set_facecolor(alt_bg)
+                cell.set_text_props(fontsize=7.5, color="#555")
+            elif raw in ("—", "0", "0.0"):
+                cell.set_facecolor(alt_bg)
+                cell.set_text_props(fontsize=7, color="#aaa")
             else:
-                cell.set_facecolor(row_bg)
-                cell.set_text_props(fontsize=8,
-                                    weight="bold" if col == "gene" else "normal",
-                                    ha="left" if col == "gene" else "center")
+                try:
+                    v = float(raw)
+                    col_max_v = df[c].max() if pd.api.types.is_numeric_dtype(df[c]) else 1
+                    alpha = min(0.9, 0.15 + 0.75 * (v / max(col_max_v, 1))) if v > 0 else 0
+                    import matplotlib.colors as mcolors
+                    base_r, base_g, base_b, _ = mcolors.to_rgba(cell_bg)
+                    cell.set_facecolor((base_r, base_g, base_b, max(0.15, alpha)))
+                    cell.set_text_props(fontsize=7.5, color="black")
+                except (ValueError, TypeError):
+                    cell.set_facecolor(alt_bg)
+                    cell.set_text_props(fontsize=7.5)
 
-    ax.set_title(
-        f"Gene concordance — {call_type} calls",
-        fontsize=11, fontweight="bold", pad=10,
-    )
+    # Legend
+    legend_items = [
+        mpatches.Patch(color="#1a7d6e", label="Both (concordant)"),
+        mpatches.Patch(color="#c0671a", label="EPIC only"),
+        mpatches.Patch(color="#7b3f9e", label="cfRRBS only"),
+        mpatches.Patch(color="#9e2020", label="Opposite (EPIC↑cfR↓ or EPIC↓cfR↑)"),
+        mpatches.Patch(color="#5a6472", label="Neutral"),
+        mpatches.Patch(color="#1a252f", label="Summary %"),
+    ]
+    ax.legend(handles=legend_items, loc="upper right", bbox_to_anchor=(1, 1.08),
+              fontsize=7, ncol=6, framealpha=0.9)
+    ax.set_title(f"Focal gene concordance (EPIC vs cfRRBS)", fontsize=10,
+                 fontweight="bold", pad=14)
+
     plt.tight_layout()
-    out_path = os.path.join(outdir, f"concordance_table_{call_type}.png")
+    out_path = os.path.join(outdir, f"concordance_summary_{call_type}.png")
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
     logging.info(f"Gene concordance table saved to {out_path}")
@@ -1805,30 +2135,24 @@ def _create_gene_concordance_csv(gene_stats: List[pd.DataFrame], outdir: str) ->
         logging.warning("No gene concordance data to export to CSV")
         return
     
-    # Select and order columns for output
+    # Select and order columns for output — matches old concordance_summary.csv format
     output_cols = [
         "gene",
         "expected_alteration",
-        "call_type",
         "n_samples",
-        "epic_only_count",
-        "epic_only_pct",
-        "cfrrbs_only_count",
-        "cfrrbs_only_pct",
-        "both_same_dir_count",
-        "both_same_dir_pct",
-        "both_opp_dir_count",
-        "both_opp_dir_pct",
-        "neutral_both_count",
-        "neutral_both_pct",
+        "both_gain",
+        "both_del",
         "epic_gain_only",
         "epic_del_only",
         "cfrrbs_gain_only",
         "cfrrbs_del_only",
-        "both_gain",
-        "both_del",
         "discordant_epic_gain",
         "discordant_epic_del",
+        "neutral_both",
+        "conc_pct",
+        "disc_pct",
+        "epic_only_pct",
+        "cfrrbs_only_pct",
     ]
     
     # Filter to only columns that exist in the dataframe
@@ -1840,11 +2164,7 @@ def _create_gene_concordance_csv(gene_stats: List[pd.DataFrame], outdir: str) ->
     for col in pct_cols:
         output_df[col] = output_df[col].round(1)
     
-    # Sort by call_type then by number of samples (descending) then by gene name
-    output_df = output_df.sort_values(
-        ["call_type", "n_samples", "gene"],
-        ascending=[True, False, True]
-    )
+    output_df = output_df.sort_values(["n_samples", "gene"], ascending=[False, True])
     
     output_path = os.path.join(outdir, "concordance_summary.csv")
     output_df.to_csv(output_path, index=False)
@@ -1955,6 +2275,9 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
     
     report_rows: List[Dict] = []
     all_focal_records: List[Dict] = []
+    # Pre-collected data for gene distribution plots — avoids re-reading files
+    gene_dist_data: Dict[str, Dict[str, list]] = {
+        "cf_ratios": {}, "ep_ratios": {}, "cf_seglens": {}, "ep_seglens": {}}
 
     for metadata in pair_metadata:
         epic_id = metadata["epic_id"]
@@ -2011,6 +2334,15 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         logging.debug(f"Paired bins after dropna: {len(merged)} rows")
         plot_path = os.path.join(sample_pair_dir, "corr_bins_scatter.png")
         _plot_scatter(merged, plot_path, title_prefix="Bins - ", corr=corr_bins)
+
+        # Coverage distributions (reads/probes per bin)
+        cf_bins_stats_path = temp_outid + "_plot_bins_stats.tsv"
+        epic_probe_counts = _load_epic_probe_counts(epic_dir, epic_id)
+        _plot_coverage_distributions(
+            cf_bins_stats_path, epic_probe_counts,
+            os.path.join(sample_pair_dir, "coverage_distributions.png"),
+            pair_id,
+        )
 
         cf_segments_path = temp_outid + "_segments.bed"
         cf_aberrations_path = temp_outid + "_aberrations.bed"
@@ -2128,6 +2460,54 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 logging.warning(f"[{pair_id}] Failed to load EPIC detail: {e}")
                 epic_detail_df = pd.DataFrame()
 
+        # ── Collect gene ratio/segment data for distribution plots ───────────────
+        try:
+            if not cf_detail_df.empty and "name" in cf_detail_df.columns and "ratio" in cf_detail_df.columns:
+                for _, gr in cf_detail_df.iterrows():
+                    g = str(gr.get("name", "")).strip()
+                    r = float(gr.get("ratio", float("nan")))
+                    if g and np.isfinite(r):
+                        gene_dist_data["cf_ratios"].setdefault(g, []).append(r)
+            if not cf_segments.empty:
+                segs_n = cf_segments.copy()
+                segs_n["chr_n"] = segs_n["chr"].astype(str).str.replace("chr", "")
+                if not cf_detail_df.empty and "name" in cf_detail_df.columns:
+                    for _, gr in cf_detail_df.iterrows():
+                        g = str(gr.get("name", "")).strip()
+                        gc = str(gr.get("chr", "")).replace("chr", "")
+                        gs, ge = gr.get("start"), gr.get("end")
+                        ov = segs_n[(segs_n["chr_n"] == gc) &
+                                    (segs_n["start"] <= ge) & (segs_n["end"] >= gs)]
+                        for _, seg in ov.iterrows():
+                            sl = (int(seg["end"]) - int(seg["start"])) / 1e6
+                            if sl > 0:
+                                gene_dist_data["cf_seglens"].setdefault(g, []).append(sl)
+            if not epic_detail_df.empty and "name" in epic_detail_df.columns and "ratio" in epic_detail_df.columns:
+                for _, gr in epic_detail_df.iterrows():
+                    g = str(gr.get("name", "")).strip()
+                    r = float(pd.to_numeric(gr.get("ratio", float("nan")), errors="coerce"))
+                    if g and np.isfinite(r):
+                        gene_dist_data["ep_ratios"].setdefault(g, []).append(r)
+            # EPIC segment lengths per gene (epic_segments already normalized by _load_epic_bins_segments_from_tsv)
+            if not epic_segments.empty and not epic_detail_df.empty and "name" in epic_detail_df.columns:
+                segs_ep = epic_segments.copy()
+                segs_ep["chr_n"] = segs_ep["chr"].astype(str).str.replace("chr", "")
+                for _, gr in epic_detail_df.iterrows():
+                    g = str(gr.get("name", "")).strip()
+                    gc = str(gr.get("chr", "")).replace("chr", "")
+                    gs = pd.to_numeric(gr.get("start", float("nan")), errors="coerce")
+                    ge = pd.to_numeric(gr.get("end", float("nan")), errors="coerce")
+                    if not (g and np.isfinite(gs) and np.isfinite(ge)):
+                        continue
+                    ov = segs_ep[(segs_ep["chr_n"] == gc) &
+                                 (segs_ep["start"] <= ge) & (segs_ep["end"] >= gs)]
+                    for _, seg in ov.iterrows():
+                        sl = (float(seg["end"]) - float(seg["start"])) / 1e6
+                        if sl > 0:
+                            gene_dist_data["ep_seglens"].setdefault(g, []).append(sl)
+        except Exception as _e:
+            logging.debug(f"Gene dist data collection failed: {_e}")
+
         # EPIC focal calls from R (conumee2 CNV.focal output)
         epic_focal_gains: Set[str] = set()
         epic_focal_dels: Set[str] = set()
@@ -2205,6 +2585,28 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 "concordance": row["concordant"],
             })
 
+        # Collect median coverage stats for summary plot
+        epic_median_probes, cfrrbs_median_reads = None, None
+        try:
+            epc_path = os.path.join(epic_dir, f"{epic_id}_bins_probecount.tsv")
+            if os.path.exists(epc_path):
+                ep_df = pd.read_csv(epc_path, sep="\t")
+                probe_col = next((c for c in ep_df.columns if "probe" in c.lower()), None)
+                if probe_col is None and ep_df.shape[1] >= 4:
+                    probe_col = ep_df.columns[3]
+                if probe_col:
+                    epic_median_probes = float(pd.to_numeric(ep_df[probe_col], errors="coerce").dropna().median())
+        except Exception:
+            pass
+        try:
+            cf_bsp = temp_outid + "_plot_bins_stats.tsv"
+            if os.path.exists(cf_bsp):
+                cf_bsp_df = pd.read_csv(cf_bsp, sep="\t")
+                if "reads" in cf_bsp_df.columns:
+                    cfrrbs_median_reads = float(pd.to_numeric(cf_bsp_df["reads"], errors="coerce").dropna().median())
+        except Exception:
+            pass
+
         report_rows.append({
             "epic_id": epic_id,
             "cfrrbs_id": cfrrbs_id,
@@ -2218,6 +2620,8 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             "segments_spearman": corr_segments["spearman"],
             "segments_spearman_p": corr_segments["spearman_p"],
             "segments_n": corr_segments["n_segments"],
+            "epic_median_probes": epic_median_probes,
+            "cfrrbs_median_reads": cfrrbs_median_reads,
         })
 
         # Regenerate cfRRBS genome_wide.png so focal gene labels are coloured
@@ -2256,6 +2660,12 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             logging.info("Correlation summary written")
         except Exception as e:
             logging.warning(f"Failed to create correlation summary: {e}")
+
+        try:
+            _plot_summary_coverage_distributions(report_rows, summary_dir)
+            logging.info("Summary coverage distributions written")
+        except Exception as e:
+            logging.warning(f"Failed to create summary coverage distributions: {e}")
 
     if all_focal_records:
         try:
@@ -2313,6 +2723,19 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         logging.info("Genome-wide CNV plots collected")
     except Exception as e:
         logging.warning(f"Failed to collect genome-wide CNV plots: {e}")
+
+    try:
+        _plot_gene_distributions(pair_metadata, all_focal_records, [], summary_dir,
+                                 gene_dist_data=gene_dist_data)
+        logging.info("Gene distributions written")
+    except Exception as e:
+        logging.warning(f"Failed to generate gene distributions: {e}")
+
+    try:
+        _plot_global_segment_lengths(pair_metadata, summary_dir)
+        logging.info("Global segment length plots written")
+    except Exception as e:
+        logging.warning(f"Failed to generate global segment length plots: {e}")
 
     logging.info(f"EPIC vs cfRRBS pipeline completed successfully ({len(report_rows)} pairs)")
 
