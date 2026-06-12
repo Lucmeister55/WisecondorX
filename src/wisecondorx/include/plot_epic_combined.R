@@ -139,28 +139,34 @@ tryCatch({
       })
 
       tryCatch({
-        # Probes-per-bin count: x@bin contains bin-level data including probe counts
+        # Probes-per-bin count: extract from x@anno@bins which contains probe counts
         probecount_out <- file.path(out_dir, paste0(epic_id, "_bins_probecount.tsv"))
-        bin_gr <- x@bin
-        bin_df <- as.data.frame(bin_gr)
-        # Column names vary by conumee2 version — seqnames/start/end or Chromosome/Start/End
-        chr_col   <- if ("seqnames"   %in% names(bin_df)) "seqnames"   else "Chromosome"
-        start_col <- if ("start"      %in% names(bin_df)) "start"      else "Start"
-        end_col   <- if ("end"        %in% names(bin_df)) "end"        else "End"
-        probe_col <- if ("nprobes"    %in% names(bin_df)) "nprobes"    else
-                     if ("probes"     %in% names(bin_df)) "probes"     else
-                     if ("num.mark"   %in% names(bin_df)) "num.mark"   else NULL
-        if (!is.null(probe_col)) {
-          out_df <- data.frame(
-            seqnames = bin_df[[chr_col]],
-            start    = bin_df[[start_col]],
-            end      = bin_df[[end_col]],
-            probes   = bin_df[[probe_col]]
-          )
-          write.table(out_df, file = probecount_out, sep = "\t", row.names = FALSE, quote = FALSE)
-          cat(paste("    Wrote probecount to", probecount_out, "\n"))
+
+        if (!is.null(x@anno) && !is.null(x@anno@bins) && length(x@anno@bins) > 0) {
+          bins_gr <- x@anno@bins  # GRanges with bin coordinates and probe count metadata
+          bin_df <- as.data.frame(bins_gr)
+
+          chr_col   <- if ("seqnames" %in% names(bin_df)) "seqnames" else "Chromosome"
+          start_col <- if ("start" %in% names(bin_df)) "start" else "Start"
+          end_col   <- if ("end" %in% names(bin_df)) "end" else "End"
+
+          # The probes column should already exist in bin_df from x@anno@bins metadata
+          probe_col <- if ("probes" %in% names(bin_df)) "probes" else NULL
+
+          if (!is.null(probe_col)) {
+            out_df <- data.frame(
+              seqnames = bin_df[[chr_col]],
+              start    = as.integer(bin_df[[start_col]]),
+              end      = as.integer(bin_df[[end_col]]),
+              probes   = as.integer(bin_df[[probe_col]])
+            )
+            write.table(out_df, file = probecount_out, sep = "\t", row.names = FALSE, quote = FALSE)
+            cat(paste("    Wrote probecount to", probecount_out, "with", sum(bin_df[[probe_col]], na.rm=TRUE), "probes\n"))
+          } else {
+            cat(paste("    Warning: probes column not found in x@anno@bins, skipping probecount\n"))
+          }
         } else {
-          cat(paste("    Note: no probe count column found in x@bin, skipping probecount\n"))
+          cat(paste("    Warning: x@anno@bins empty, skipping probecount\n"))
         }
       }, error = function(e) {
         cat(paste("    Warning: Failed to write probecount:", e$message, "\n"))

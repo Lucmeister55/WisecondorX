@@ -584,9 +584,9 @@ def _generate_gene_calls_and_plots(rem_input, results):
     except Exception as _e:
         print(f"[WisecondorX] Purity estimation failed: {_e}", file=sys.stderr)
 
-    # ── Gold-standard focal calling: segment-based, |log2|>=0.2 AND |z|>=2.5, <3Mb ─
-    FOCAL_MAX_BP   = 3_000_000
-    FOCAL_LOG2_THR = 0.2
+    # ── Gold-standard focal calling: segment-based, |log2|>=0.25 AND |z|>=2.5, <5Mb ─
+    FOCAL_MAX_BP   = 5_000_000
+    FOCAL_LOG2_THR = 0.25
     FOCAL_Z_THR    = 2.5
 
     def _seg_zscore(seg_ratio):

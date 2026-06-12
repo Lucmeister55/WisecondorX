@@ -1657,56 +1657,85 @@ def _load_expected_alterations_from_regions(regions_bed_path: str = None) -> Dic
 def _aggregate_gene_concordance_stats(records: List[Dict], call_type: str, expected_alterations: Dict[str, str] = None) -> pd.DataFrame:
     """
     Aggregate concordance records by gene to compute overall statistics.
-    
+
     For each gene, counts:
     - How many times EPIC only (gain or deletion separately)
     - How many times cfRRBS only (gain or deletion separately)
     - How many times both same direction (both gain or both deletion)
     - How many times both opposite direction
     - Percentages for each category
-    
+
     Args:
         records: List of dicts with keys: gene, sample_id, epic_call, cfrrbs_call, concordance
         call_type: "broad" or "focal" (for labeling)
         expected_alterations: Optional dict mapping gene (lowercase) -> "amp" or "del"
-    
+
     Returns:
-        DataFrame with gene-level concordance statistics
+        DataFrame with gene-level concordance statistics (includes all expected_alterations genes)
     """
-    if not records:
-        return pd.DataFrame()
-    
     if expected_alterations is None:
         expected_alterations = {}
-    
+
+    if not records:
+        # Even with no records, return all expected genes as neutral
+        if expected_alterations:
+            gene_stats = []
+            for gene_lower, alt in expected_alterations.items():
+                gene_stats.append({
+                    "gene": gene_lower,
+                    "expected_alteration": alt,
+                    "n_samples": 0,
+                    "both_gain": 0,
+                    "both_del": 0,
+                    "epic_gain_only": 0,
+                    "epic_del_only": 0,
+                    "cfrrbs_gain_only": 0,
+                    "cfrrbs_del_only": 0,
+                    "discordant_epic_gain": 0,
+                    "discordant_epic_del": 0,
+                    "neutral_both": 0,
+                    "conc_pct": 0.0,
+                    "disc_pct": 0.0,
+                    "epic_only_pct": 0.0,
+                    "cfrrbs_only_pct": 0.0,
+                })
+            return pd.DataFrame(gene_stats)
+        return pd.DataFrame()
+
     df = pd.DataFrame(records)
-    
+    n_cohort = len(df["sample_id"].unique())  # Total number of samples in cohort
+
+    # Collect all genes: prefer original case from records, fall back to expected_alterations keys
+    # Build a lowercase -> original_case map to avoid duplicates like 'EGFR' and 'egfr'
+    gene_case_map = {g.lower(): g for g in df["gene"].unique()}
+    for gene_lower in expected_alterations.keys():
+        if gene_lower not in gene_case_map:
+            gene_case_map[gene_lower] = gene_lower
+    all_genes = sorted(gene_case_map.values())
+
     # Aggregate by gene
     gene_stats = []
-    for gene in sorted(df["gene"].unique()):
-        gene_df = df[df["gene"] == gene]
-        n_total = len(gene_df)
-        
-        # Count concordance categories (without correctness/missed concepts)
-        both_gain = sum(gene_df["concordance"] == "both_gain")
-        both_del = sum(gene_df["concordance"] == "both_del")
-        epic_gain_only = sum(gene_df["concordance"] == "epic_gain_only")
-        epic_del_only = sum(gene_df["concordance"] == "epic_del_only")
-        cfrrbs_gain_only = sum(gene_df["concordance"] == "cfrrbs_gain_only")
-        cfrrbs_del_only = sum(gene_df["concordance"] == "cfrrbs_del_only")
-        discordant_epic_gain = sum(gene_df["concordance"] == "discordant_epic_gain")
-        discordant_epic_del = sum(gene_df["concordance"] == "discordant_epic_del")
-        neutral_both = sum(gene_df["concordance"] == "neutral")
-        
-        # Aggregate into broader categories (without correctness notion)
-        epic_only = epic_gain_only + epic_del_only
-        cfrrbs_only = cfrrbs_gain_only + cfrrbs_del_only
-        both_concordant = both_gain + both_del  # same direction
-        both_discordant = discordant_epic_gain + discordant_epic_del  # opposite direction
-        
+    for gene in all_genes:
+        gene_df = df[df["gene"].str.lower() == gene.lower()]
+        n_total = len(gene_df) if not gene_df.empty else n_cohort
+
+        # Count concordance categories
+        both_gain = sum(gene_df["concordance"] == "both_gain") if not gene_df.empty else 0
+        both_del = sum(gene_df["concordance"] == "both_del") if not gene_df.empty else 0
+        epic_gain_only = sum(gene_df["concordance"] == "epic_gain_only") if not gene_df.empty else 0
+        epic_del_only = sum(gene_df["concordance"] == "epic_del_only") if not gene_df.empty else 0
+        cfrrbs_gain_only = sum(gene_df["concordance"] == "cfrrbs_gain_only") if not gene_df.empty else 0
+        cfrrbs_del_only = sum(gene_df["concordance"] == "cfrrbs_del_only") if not gene_df.empty else 0
+        discordant_epic_gain = sum(gene_df["concordance"] == "discordant_epic_gain") if not gene_df.empty else 0
+        discordant_epic_del = sum(gene_df["concordance"] == "discordant_epic_del") if not gene_df.empty else 0
+        neutral_both = sum(gene_df["concordance"] == "neutral") if not gene_df.empty else 0
+
+        if gene_df.empty:
+            neutral_both = n_cohort
+
         # Lookup expected alteration
         expected_alt = expected_alterations.get(gene.lower(), "")
-        
+
         pct = lambda n: round(100 * n / n_total, 1) if n_total > 0 else 0.0
         gene_stats.append({
             "gene": gene,
@@ -1721,12 +1750,12 @@ def _aggregate_gene_concordance_stats(records: List[Dict], call_type: str, expec
             "discordant_epic_gain": discordant_epic_gain,
             "discordant_epic_del": discordant_epic_del,
             "neutral_both": neutral_both,
-            "conc_pct": pct(both_gain + both_del),
+            "conc_pct": pct(both_gain + both_del + neutral_both),
             "disc_pct": pct(discordant_epic_gain + discordant_epic_del),
             "epic_only_pct": pct(epic_gain_only + epic_del_only),
             "cfrrbs_only_pct": pct(cfrrbs_gain_only + cfrrbs_del_only),
         })
-    
+
     return pd.DataFrame(gene_stats)
 
 
@@ -1748,6 +1777,20 @@ def _plot_gene_concordance_table(gene_stats: pd.DataFrame, call_type: str, outdi
         return
 
     df = gene_stats.drop(columns=["call_type"], errors="ignore").reset_index(drop=True)
+
+    # Compute per-gene Sens and PPV
+    def _per_gene_sens(row):
+        tp = row.get("both_gain", 0) + row.get("both_del", 0)
+        fn = row.get("epic_gain_only", 0) + row.get("epic_del_only", 0)
+        return round(tp / (tp + fn) * 100, 1) if (tp + fn) > 0 else float("nan")
+
+    def _per_gene_ppv(row):
+        tp = row.get("both_gain", 0) + row.get("both_del", 0)
+        fp = row.get("cfrrbs_gain_only", 0) + row.get("cfrrbs_del_only", 0)
+        return round(tp / (tp + fp) * 100, 1) if (tp + fp) > 0 else float("nan")
+
+    df["sens_pct"] = df.apply(_per_gene_sens, axis=1)
+    df["ppv_pct"]  = df.apply(_per_gene_ppv,  axis=1)
 
     # Sort: del genes first (expected_alteration), then by n_samples desc
     if "expected_alteration" in df.columns:
@@ -1777,6 +1820,8 @@ def _plot_gene_concordance_table(gene_stats: pd.DataFrame, call_type: str, outdi
         "disc_pct":         ("#1a252f", "#dce8f0"),
         "epic_only_pct":    ("#1a252f", "#dce8f0"),
         "cfrrbs_only_pct":  ("#1a252f", "#dce8f0"),
+        "sens_pct":         ("#1a4f6e", "#cce4f7"),
+        "ppv_pct":          ("#1a4f6e", "#cce4f7"),
     }
 
     col_names = [c for c in COL_GROUPS if c in df.columns]
@@ -1808,6 +1853,7 @@ def _plot_gene_concordance_table(gene_stats: pd.DataFrame, call_type: str, outdi
         "neutral_both": "Neutral",
         "conc_pct": "Conc%", "disc_pct": "Disc%",
         "epic_only_pct": "EPIC%", "cfrrbs_only_pct": "cfR%",
+        "sens_pct": "Sens%", "ppv_pct": "PPV%",
     }
     col_labels = [LABELS.get(c, c) for c in col_names]
 
@@ -1883,8 +1929,24 @@ def _plot_gene_concordance_table(gene_stats: pd.DataFrame, call_type: str, outdi
     ]
     ax.legend(handles=legend_items, loc="upper right", bbox_to_anchor=(1, 1.08),
               fontsize=7, ncol=6, framealpha=0.9)
-    ax.set_title(f"Focal gene concordance (EPIC vs cfRRBS)", fontsize=10,
-                 fontweight="bold", pad=14)
+
+    # Compute Sens / PPV from aggregated counts
+    tp = int(df["both_gain"].sum() + df["both_del"].sum()) if "both_gain" in df.columns else 0
+    fp = int(df.get("cfrrbs_gain_only", pd.Series([0])).sum()
+             + df.get("cfrrbs_del_only", pd.Series([0])).sum())
+    fn = int(df.get("epic_gain_only", pd.Series([0])).sum()
+             + df.get("epic_del_only", pd.Series([0])).sum())
+    n_cohort = int(df["n_samples"].max()) if "n_samples" in df.columns else 0
+    sens = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+    ppv  = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+    sens_str = f"{sens:.3f}" if not pd.isna(sens) else "n/a"
+    ppv_str  = f"{ppv:.3f}"  if not pd.isna(ppv)  else "n/a"
+
+    ax.set_title(
+        f"Focal gene concordance (EPIC vs cfRRBS)"
+        f"   |   n={n_cohort} samples   Sens={sens_str}   PPV={ppv_str}"
+        f"   (TP={tp}  FP={fp}  FN={fn})",
+        fontsize=10, fontweight="bold", pad=14)
 
     plt.tight_layout()
     out_path = os.path.join(outdir, f"concordance_summary_{call_type}.png")
@@ -2200,7 +2262,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
         cf_focal_df = pd.DataFrame(columns=["gene", "chr", "start", "end", "ratio",
                                              "zscore", "seg_ratio", "seg_zscore", "focal_call", "pval"])
         for call_type, label in [("amplified", "gain"), ("deleted", "deletion")]:
-            focal_path = os.path.join(cfrrbs_dir, f"{cfrrbs_id}_focal_{label}_genes.tsv")
+            focal_path = os.path.join(cfrrbs_dir, f"{cfrrbs_id}_focal_{call_type}_genes.tsv")
             if os.path.exists(focal_path):
                 try:
                     tmp = pd.read_csv(focal_path, sep="\t")
@@ -2208,7 +2270,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                         tmp["focal_call"] = label
                         cf_focal_df = pd.concat([cf_focal_df, tmp], ignore_index=True)
                 except Exception as e:
-                    logging.warning(f"[{pair_id}] Failed to read focal {label} genes: {e}")
+                    logging.warning(f"[{pair_id}] Failed to read focal {call_type} genes: {e}")
 
         logging.info(
             f"[{pair_id}] cfRRBS focal: gain={sum(cf_focal_df['focal_call']=='gain')}, "
@@ -2339,26 +2401,50 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
                 return "both_gain" if e == "gain" else "both_del"
             return "discordant_epic_gain" if e == "gain" else "discordant_epic_del"
 
-        # Per-pair focal concordance
+        # Per-pair focal concordance - include all genes from EPIC or cfRRBS
         epic_focal_gains_lower = {g.lower() for g in epic_focal_gains}
         epic_focal_dels_lower = {g.lower() for g in epic_focal_dels}
-        focal_rows = []
+
+        # Collect all genes from both sources (with case-insensitive dedup)
+        all_genes_set = set()
+        gene_info = {}  # Maps gene_lower -> (original_name, chr, start, end, ratio)
+
         for _, cf_r in cf_focal_df.iterrows():
             gene_name = str(cf_r.get("gene", "")).strip()
             gene_lower = gene_name.lower()
-            cf_call = cf_r.get("focal_call", "neutral")
+            all_genes_set.add(gene_lower)
+            gene_info[gene_lower] = (gene_name, cf_r.get("chr"), cf_r.get("start"),
+                                     cf_r.get("end"), cf_r.get("ratio", float("nan")))
+
+        for gene in epic_focal_gains | epic_focal_dels:
+            gene_lower = gene.lower()
+            all_genes_set.add(gene_lower)
+            if gene_lower not in gene_info:
+                gene_info[gene_lower] = (gene, None, None, None, float("nan"))
+
+        cf_genes_lower = {g.lower() for g in cf_focal_df["gene"].astype(str)} if not cf_focal_df.empty else set()
+        focal_rows = []
+        for gene_lower in sorted(all_genes_set):
+            gene_name, chr_val, start_val, end_val, ratio_val = gene_info[gene_lower]
+
             if gene_lower in epic_focal_gains_lower:
                 ep_call = "gain"
             elif gene_lower in epic_focal_dels_lower:
                 ep_call = "deletion"
             else:
                 ep_call = "neutral"
+
+            if gene_lower in cf_genes_lower:
+                cf_call = cf_focal_df[cf_focal_df["gene"].str.lower() == gene_lower]["focal_call"].iloc[0]
+            else:
+                cf_call = "neutral"
+
             focal_rows.append({
                 "gene": gene_name,
-                "chr": cf_r.get("chr"),
-                "start": cf_r.get("start"),
-                "end": cf_r.get("end"),
-                "cfrrbs_ratio": cf_r.get("ratio", float("nan")),
+                "chr": chr_val,
+                "start": start_val,
+                "end": end_val,
+                "cfrrbs_ratio": ratio_val,
                 "cfrrbs_focal": cf_call,
                 "epic_focal": ep_call,
                 "concordant": _concordance(ep_call, cf_call),
