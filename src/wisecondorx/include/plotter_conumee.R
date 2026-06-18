@@ -200,11 +200,11 @@ color.segmentLine = "#e0e0e0"
 chr_sep_col <- "#bdbdbd"  # solid grey for chromosome separators
 cent_col <- "#9e9e9e"     # dashed grey for centromeres
 
-# Conumee2-style colors
-color.A  = "lightgrey"   # neutral
-color.B  = "red"         # loss
-color.C  = "green"       # gain
-color.D  = "darkblue"    # labels etc
+# CNV colors (shared with plotter.R)
+color.A  = "lightgrey"                              # neutral
+color.B  = rgb(245, 166, 35,  maxColorValue=255)    # loss  — warm golden-orange
+color.C  = rgb(155, 170, 212, maxColorValue=255)    # gain  — lavender-periwinkle
+color.D  = "#333333"                                # labels etc
 color.X <- c(rgb(141, 209, 198, maxColorValue=255), rgb(84, 84, 84, maxColorValue=255), rgb(227, 200, 138, maxColorValue=255))
 
 # Transparent versions for segments
@@ -254,7 +254,7 @@ for (x in chr.ends){
 # Set dot colors (conumee-style gradient)
 # -----------------------------
 n.colors <- 1000
-gradient.colors <- colorRampPalette(c("red", "red", "lightgrey", "green", "green"))(n.colors)
+gradient.colors <- colorRampPalette(c(color.B, color.B, "lightgrey", color.C, color.C))(n.colors)
 
 # Set limits for gradient mapping based on ylim
 max_ratio <- max(abs(c(chr.wide.lower.limit, chr.wide.upper.limit)))
@@ -314,7 +314,7 @@ gene_labels <- data.frame(start_bin=integer(), end_bin=integer(), label=characte
 # Load gene annotation files.
 # Priority: focal/broad override files (written after gene calling in epic_cfrrbs.py) >
 #           original amplified/deleted files (written during predict).
-# focal genes -> red (#c0392b), broad-only genes -> purple (#8e44ad), neutral -> black
+# focal genes -> red (#c0392b), broad-only genes -> red (#c0392b), neutral -> black
 outid_base <- gsub("\\.plots$", "", out.dir)
 
 load_gene_names <- function(filepath, name_col = c("gene", "name")) {
@@ -413,9 +413,9 @@ append_labels_from_regions <- function(regions_df) {
 
     # focal=purple, neutral=black
     label_col <- if (use_focal_broad) {
-      if (label_value %in% focal_genes) "#8e44ad" else "black"
+      if (label_value %in% focal_genes) "#c0392b" else "black"
     } else {
-      if (label_value %in% amplified_genes || label_value %in% deleted_genes) "#8e44ad" else "black"
+      if (label_value %in% amplified_genes || label_value %in% deleted_genes) "#c0392b" else "black"
     }
 
     gene_labels <<- rbind(gene_labels,
@@ -544,8 +544,7 @@ for (ab in input$results_c){
 
   # calculate median for this segment
   seg_median <- median(ratio[start:end], na.rm=TRUE)
-  # Draw horizontal line at median
-  segments(start, seg_median, end, seg_median, col="darkblue", 
+  segments(start, seg_median, end, seg_median, col="darkblue",
            lwd=4, lty=1)
 }
 
@@ -648,8 +647,8 @@ if (!genome_only){
       rect(start, height, end, 0, col=color.XX[dot.cols[start] == color.X],border=color.XX[dot.cols[start] == color.X], lwd=0.1)
       # Conumee-style median line for segment
       seg_median <- median(ratio[start:end], na.rm=TRUE)
-       segments(start, seg_median, end, seg_median, col="darkblue",
-         lwd=3, lty=1)
+      segments(start, seg_median, end, seg_median, col="darkblue",
+        lwd=3, lty=1)
     }
 
     rect(0, lower.limit - 10, chr.ends[c], upper.limit + 10, col="white", border=NA)

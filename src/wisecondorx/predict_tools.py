@@ -1,5 +1,6 @@
 # WisecondorX
 
+import logging
 import os
 
 import numpy as np
@@ -164,7 +165,8 @@ def normalize_repeat(test_data, ref_file, optimal_cutoff, ct, cp, ap):
         )
 
         test_copy[ct:][np.abs(results_z) >= norm.ppf(0.99)] = -1
-    m_lr = np.nanmedian(np.log2(results_r))
+    valid_r = results_r[results_r > 0]
+    m_lr = np.nanmedian(np.log2(valid_r)) if len(valid_r) > 0 else 0.0
     m_z = np.nanmedian(results_z)
 
     return results_z, results_r, ref_sizes, results_variance, m_lr, m_z
@@ -324,6 +326,61 @@ def log_trans(results, log_r_median):
                 results["results_w"][c][i] = 0
             if results["results_r"][c][i] != 0:
                 results["results_r"][c][i] = results["results_r"][c][i] - log_r_median
+
+
+"""
+Restricts the sample read-count array (pre-normalization) to bins that
+overlap at least one interval in a BED file.  Bins outside the BED are
+zeroed so they contribute nothing to coverage normalisation, PCA or CBS.
+"""
+
+
+def apply_restrict_bed(sample, bed_path, binsize):
+    # Parse intervals keyed by the same chr strings used in the sample dict
+    intervals = {}
+    with open(bed_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            chrom = parts[0]
+            if chrom.startswith("chr"):
+                chrom = chrom[3:]
+            if chrom == "X":
+                chrom = "23"
+            elif chrom == "Y":
+                chrom = "24"
+            try:
+                intervals.setdefault(chrom, []).append((int(parts[1]), int(parts[2])))
+            except ValueError:
+                continue
+
+    n_kept = n_zeroed = 0
+    for chrom_key, counts in sample.items():
+        n_bins = len(counts)
+        chrom = str(chrom_key)
+        if chrom not in intervals:
+            n_zeroed += int(np.count_nonzero(counts))
+            counts[:] = 0
+            continue
+
+        keep = np.zeros(n_bins, dtype=bool)
+        for s, e in intervals[chrom]:
+            bin_s = s // binsize
+            bin_e = e // binsize + 1
+            keep[bin_s : min(bin_e, n_bins)] = True
+
+        n_kept   += int(np.count_nonzero(counts[keep]))
+        n_zeroed += int(np.count_nonzero(counts[~keep]))
+        counts[~keep] = 0
+
+    logging.info(
+        "restrict-bed: %d bins kept, %d bins zeroed (%.1f%% of non-zero bins retained)",
+        n_kept, n_zeroed, 100 * n_kept / max(n_kept + n_zeroed, 1),
+    )
 
 
 """

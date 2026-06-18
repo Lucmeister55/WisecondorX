@@ -27,6 +27,7 @@ from wisecondorx.predict_tools import (
     log_trans,
     exec_cbs,
     apply_blacklist,
+    apply_restrict_bed,
     predict_gender,
 )
 
@@ -185,6 +186,10 @@ def tool_test(args):
     sample = scale_sample(
         sample, int(sample_file["binsize"].item()), int(ref_file["binsize"])
     )
+
+    if args.restrict_bed:
+        logging.info("Applying restrict-bed filter ...")
+        apply_restrict_bed(sample, args.restrict_bed, int(ref_file["binsize"]))
 
     gender = predict_gender(sample, ref_file["trained_cutoff"])
     if not ref_file["is_nipt"]:
@@ -530,6 +535,15 @@ def main():
         "file: chr...(/t)startpos(/t)endpos(/n)",
     )
     parser_test.add_argument(
+        "--restrict-bed",
+        type=str,
+        default=None,
+        dest="restrict_bed",
+        help="BED file of regions to retain. Bins not overlapping any interval are "
+        "zeroed immediately after scaling, before normalisation, CBS, and plotting. "
+        "Use e.g. a CpG-island BED to restrict analysis to low-noise bins.",
+    )
+    parser_test.add_argument(
         "--gender",
         type=str,
         choices=["F", "M"],
@@ -663,6 +677,15 @@ def main():
         default=None,
         help="Blacklist that masks regions in output, structure of header-less "
         "file: chr...(/t)startpos(/t)endpos(/n)",
+    )
+    parser_epic.add_argument(
+        "--restrict-bed",
+        type=str,
+        default=None,
+        dest="restrict_bed",
+        help="BED file of regions to retain. Bins not overlapping any interval are "
+        "zeroed immediately after scaling, before normalisation, CBS, and plotting. "
+        "Passed through to each underlying WisecondorX predict call.",
     )
     parser_epic.add_argument(
         "--regions",

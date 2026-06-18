@@ -122,6 +122,7 @@ def _run_cfrrbs_predict(
     reference: str,
     outid: str,
     blacklist: str = None,
+    restrict_bed: str = None,
     regions: str = None,
     normalization_method: str = "reference",
 ) -> None:
@@ -133,6 +134,8 @@ def _run_cfrrbs_predict(
     ]
     if blacklist:
         cmd.extend(["--blacklist", blacklist])
+    if restrict_bed:
+        cmd.extend(["--restrict-bed", restrict_bed])
     if regions:
         cmd.extend(["--regions", regions])
     subprocess.check_call(cmd)
@@ -2138,6 +2141,7 @@ def tool_epic_cfrrbs(args: argparse.Namespace) -> None:
             args.reference,
             temp_outid,
             blacklist=getattr(args, "blacklist", None),
+            restrict_bed=getattr(args, "restrict_bed", None),
             regions=getattr(args, "regions", None),
             normalization_method=getattr(args, "normalization_method", "reference"),
         )

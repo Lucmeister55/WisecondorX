@@ -93,7 +93,7 @@ tryCatch({
         CNV.genomeplot(
           x,
           chr = chr_sel,
-          cols = c("red", "red", "lightgrey", "green", "green"),
+          cols = c(rgb(245,166,35,maxColorValue=255), rgb(245,166,35,maxColorValue=255), "lightgrey", rgb(155,170,212,maxColorValue=255), rgb(155,170,212,maxColorValue=255)),
           main = "",
           bins_cex = 0.75,
           set_par = FALSE
@@ -104,7 +104,7 @@ tryCatch({
         CNV.genomeplot(
           x,
           chr = chr_sel,
-          cols = c("red", "red", "lightgrey", "green", "green"),
+          cols = c(rgb(245,166,35,maxColorValue=255), rgb(245,166,35,maxColorValue=255), "lightgrey", rgb(155,170,212,maxColorValue=255), rgb(155,170,212,maxColorValue=255)),
           main = "",
           bins_cex = 0.75,
           set_par = FALSE

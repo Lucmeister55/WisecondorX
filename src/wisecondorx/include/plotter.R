@@ -118,14 +118,14 @@ black = "#3f3f3f"
 lighter.grey = "#e0e0e0"
 
 color.A = rgb(84, 84, 84, maxColorValue=255)
-color.B = rgb(227, 200, 138, maxColorValue=255)
-color.C = rgb(141, 209, 198, maxColorValue=255)
+color.B = rgb(245, 166, 35,  maxColorValue=255)    # loss  — warm golden-orange
+color.C = rgb(155, 170, 212, maxColorValue=255)    # gain  — lavender-periwinkle
 color.D = rgb(150, 80, 33, maxColorValue=255)
 color.X <- c(color.C, color.A, color.B)
 
 color.AA = rgb(84, 84, 84, 80, maxColorValue=255)
-color.BB = rgb(227, 200, 138, 80, maxColorValue=255)
-color.CC = rgb(141, 209, 198, 80, maxColorValue=255)
+color.BB = rgb(245, 166, 35,  80, maxColorValue=255)
+color.CC = rgb(155, 170, 212, 80, maxColorValue=255)
 color.XX = c(color.CC, color.AA, color.BB)
 
 png(paste0(out.dir, "/genome_wide.png"), width=14,height=10,units="in",res=512,pointsize=18)
